@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#1a1d23">
+<title>Hantverkarassistenten</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1 id="topbar-title">Jobb</h1>
+  <button class="btn-icon" id="btn-settings" title="Inställningar">⚙</button>
+</header>
+
+<main id="view"></main>
+
+<nav class="bottomnav">
+  <button data-nav="jobs" class="active"><span class="ico">🗂</span>Jobb</button>
+  <button data-nav="calc"><span class="ico">📐</span>Material</button>
+  <button data-nav="time"><span class="ico">⏱</span>Tid</button>
+  <button data-nav="stats"><span class="ico">📊</span>Översikt</button>
+</nav>
+
+<div id="modal-root"></div>
+<div id="toast"></div>
+
+<script src="js/calc.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
