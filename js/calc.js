@@ -284,9 +284,24 @@ function pkgSack(kg, sackSize) {
   return Math.ceil(kg / sackSize) + " × " + sackSize + " kg säck";
 }
 
-function runCalc(jobKey, values) {
+/* calibration: { "<jobKey>|<itemName>": { avg, n } } — genomsnittlig kvot
+   faktisk/beräknad åtgång per material, från loggade jobb. Justerar förslaget
+   när avvikelsen är etablerad (minst 1 loggning, mer än ±3 %). */
+function runCalc(jobKey, values, calibration) {
   const job = CALC_JOBS[jobKey];
   const res = job.compute(values);
+  if (calibration) {
+    res.items.forEach(i => {
+      const cal = calibration[jobKey + "|" + i.name];
+      if (cal && cal.n >= 1 && Math.abs(cal.avg - 1) > 0.03) {
+        const factor = Math.min(2, Math.max(0.5, cal.avg));
+        i.qty = Math.ceil(i.qty * factor * 10) / 10;
+        if (i.priceLow) i.priceLow *= factor;
+        if (i.priceHigh) i.priceHigh *= factor;
+        i.calibrated = Math.round((factor - 1) * 100);
+      }
+    });
+  }
   let low = 0, high = 0;
   res.items.forEach(i => { low += i.priceLow || 0; high += i.priceHigh || 0; });
   res.totalLow = Math.round(low / 10) * 10;

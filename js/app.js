@@ -11,8 +11,11 @@ const store = {
 const state = Object.assign({
   jobs: [],            // {id, namn, kund, telefon, adress, status, skapad, notes[], material[], time[], checklist[], timpris}
   activeTimer: null,   // {jobId, start}
-  settings: { timpris: 650, foretag: "" },
+  calibration: {},     // "<calcKey>|<itemName>" -> {avg, n} — faktisk/beräknad åtgång
+  settings: { timpris: 650, foretag: "", apiKey: "" },
 }, store.load());
+state.calibration = state.calibration || {};
+state.settings.apiKey = state.settings.apiKey || "";
 
 const STATUS = ["offert", "pagaende", "klart", "fakturerat"];
 const STATUS_LABEL = { offert: "Offert", pagaende: "Pågående", klart: "Klart", fakturerat: "Fakturerat" };
@@ -172,7 +175,10 @@ function showJob(id) {
         <details ${i === j.material.length - 1 ? "open" : ""}>
           <summary>${esc(m.label)} · ${kr(m.totalLow)}–${kr(m.totalHigh)}</summary>
           ${matTable(m)}
-          <button class="btn sm danger" data-delmat="${i}" style="margin-top:6px">Ta bort lista</button>
+          <div class="row" style="margin-top:6px">
+            <button class="btn sm secondary" data-logmat="${i}">✔ Logga faktisk åtgång</button>
+            <button class="btn sm danger" data-delmat="${i}">Ta bort</button>
+          </div>
         </details>`).join("")}
     </div>
 
@@ -218,6 +224,7 @@ function showJob(id) {
   document.querySelectorAll("[data-delmat]").forEach(b => b.addEventListener("click", () => {
     j.material.splice(+b.dataset.delmat, 1); store.save(); showJob(id);
   }));
+  document.querySelectorAll("[data-logmat]").forEach(b => b.addEventListener("click", () => showLogActual(id, +b.dataset.logmat)));
 
   $("#jb-addcheck").addEventListener("click", () => {
     const text = prompt("Att göra:");
@@ -260,6 +267,41 @@ function showAddNote(jobId) {
     store.save();
     showJob(jobId);
     toast("Sparat");
+  });
+}
+
+/* ---------- Logga faktisk åtgång (kalibrering) ---------- */
+
+function showLogActual(jobId, matIndex) {
+  const j = getJob(jobId);
+  const m = j.material[matIndex];
+  modal(`
+    <div class="modal-head"><h2>Faktisk åtgång</h2><button class="btn-icon" data-close>✕</button></div>
+    <p class="muted" style="margin-bottom:12px">Fyll i vad du faktiskt använde — framtida förslag för samma jobbtyp justeras efter din historik.</p>
+    ${m.items.map((i, idx) => `
+      <label class="field"><span>${esc(i.name)} (beräknat: ${i.qty} ${i.unit})</span>
+        <input data-actual="${idx}" type="number" inputmode="decimal" step="any" min="0"
+               value="${i.actual ?? ""}" placeholder="${i.qty}"></label>`).join("")}
+    <button class="btn block" id="la-save">Spara</button>
+  `);
+  $("#la-save").addEventListener("click", () => {
+    document.querySelectorAll("[data-actual]").forEach(el => {
+      const actual = parseFloat(el.value);
+      if (!(actual > 0)) return;
+      const item = m.items[+el.dataset.actual];
+      item.actual = actual;
+      if (m.calcKey && item.qty > 0) {
+        const key = m.calcKey + "|" + item.name;
+        const cal = state.calibration[key] || { avg: 1, n: 0 };
+        const ratio = actual / item.qty;
+        cal.avg = (cal.avg * cal.n + ratio) / (cal.n + 1);
+        cal.n++;
+        state.calibration[key] = cal;
+      }
+    });
+    store.save();
+    toast("Åtgång loggad");
+    showJob(jobId);
   });
 }
 
@@ -324,9 +366,15 @@ function renderCalc() {
   const v = $("#view");
   const cats = [...new Set(Object.values(CALC_JOBS).map(j => j.cat))];
 
+  if (calcSelected === "__ai__") { renderAICalc(); return; }
+
   if (!calcSelected) {
     v.innerHTML = `
       ${calcTargetJob ? `<div class="warn">Listan sparas på jobbet: <strong>${esc(getJob(calcTargetJob)?.namn || "")}</strong></div>` : ""}
+      <div class="card tappable" id="calc-ai" style="border-color: var(--accent)">
+        <strong>✨ Beskriv jobbet fritt (AI)</strong>
+        <div class="muted">Skriv eller diktera — t.ex. "klinker i badrum 4×2,5 m med pelare i hörnet"</div>
+      </div>
       ${cats.map(cat => `
         <h2 style="margin-top:14px">${cat}</h2>
         ${Object.entries(CALC_JOBS).filter(([, j]) => j.cat === cat).map(([key, j]) =>
@@ -335,6 +383,7 @@ function renderCalc() {
     v.querySelectorAll("[data-calc]").forEach(c => c.addEventListener("click", () => {
       calcSelected = c.dataset.calc; renderCalc();
     }));
+    $("#calc-ai").addEventListener("click", () => { calcSelected = "__ai__"; renderCalc(); });
     return;
   }
 
@@ -369,47 +418,92 @@ function renderCalc() {
     });
     if (missing) { toast("Fyll i måtten först"); return; }
 
-    const res = runCalc(calcSelected, values);
-    $("#calc-result").innerHTML = `
-      <div class="card">
-        <h3>Materialförslag</h3>
-        ${matTable(res)}
-        <div class="total-line"><span>Uppskattad kostnad</span><span>${kr(res.totalLow)}–${kr(res.totalHigh)}</span></div>
-        ${res.warnings.map(w => `<div class="warn">⚠ ${w}</div>`).join("")}
-        <p class="muted">Riktpriser bygghandel inkl. moms. Justera mot dina leverantörsavtal.</p>
-        <button class="btn block" id="calc-save">💾 Spara på jobb</button>
-        <button class="btn block secondary" id="calc-copy" style="margin-top:8px">📋 Kopiera lista</button>
-      </div>`;
-    $("#calc-result").scrollIntoView({ behavior: "smooth" });
+    const res = runCalc(calcSelected, values, state.calibration);
+    renderCalcResult(res, job.label, calcSelected);
+  });
+}
 
-    const listText = job.label + "\n" + res.items.map(i =>
-      `• ${i.name}: ${i.qty} ${i.unit}${i.pkg ? " (" + i.pkg + ")" : ""}`).join("\n");
+/* Renderar ett beräkningsresultat (deterministiskt eller AI) med spara/kopiera. */
+function renderCalcResult(res, label, calcKey) {
+  const calNote = res.items.some(i => i.calibrated)
+    ? `<div class="warn">📈 Justerat efter din loggade åtgång: ${res.items.filter(i => i.calibrated)
+        .map(i => `${esc(i.name)} ${i.calibrated > 0 ? "+" : ""}${i.calibrated} %`).join(", ")}</div>` : "";
+  $("#calc-result").innerHTML = `
+    <div class="card">
+      <h3>Materialförslag${calcKey ? "" : " (AI)"}</h3>
+      ${matTable(res)}
+      <div class="total-line"><span>Uppskattad kostnad</span><span>${kr(res.totalLow)}–${kr(res.totalHigh)}</span></div>
+      ${calNote}
+      ${(res.questions || []).map(q => `<div class="warn">❓ ${esc(q)}</div>`).join("")}
+      ${res.warnings.map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join("")}
+      <p class="muted">Riktpriser bygghandel inkl. moms. Justera mot dina leverantörsavtal.</p>
+      <button class="btn block" id="calc-save">💾 Spara på jobb</button>
+      <button class="btn block secondary" id="calc-copy" style="margin-top:8px">📋 Kopiera lista</button>
+    </div>`;
+  $("#calc-result").scrollIntoView({ behavior: "smooth" });
 
-    $("#calc-copy").addEventListener("click", async () => {
-      await navigator.clipboard.writeText(listText);
-      toast("Kopierat!");
-    });
+  const listText = label + "\n" + res.items.map(i =>
+    `• ${i.name}: ${i.qty} ${i.unit}${i.pkg ? " (" + i.pkg + ")" : ""}`).join("\n");
 
-    $("#calc-save").addEventListener("click", () => {
-      const saveTo = jobId => {
-        getJob(jobId).material.push({ label: job.label, items: res.items, totalLow: res.totalLow, totalHigh: res.totalHigh, ts: Date.now() });
-        store.save();
-        toast("Sparat på jobbet");
-        calcSelected = null; calcTargetJob = null;
-        navTo("jobs");
-        showJob(jobId);
-      };
-      if (calcTargetJob) { saveTo(calcTargetJob); return; }
-      if (state.jobs.length === 0) { toast("Skapa ett jobb först"); return; }
-      modal(`
-        <div class="modal-head"><h2>Spara på vilket jobb?</h2><button class="btn-icon" data-close>✕</button></div>
-        ${state.jobs.slice().sort((a, b) => b.skapad - a.skapad).map(jb =>
-          `<div class="card tappable" data-pick="${jb.id}"><strong>${esc(jb.namn)}</strong> <span class="badge ${jb.status}">${STATUS_LABEL[jb.status]}</span></div>`).join("")}
-      `);
-      document.querySelectorAll("[data-pick]").forEach(c => c.addEventListener("click", () => {
-        closeModal(); saveTo(c.dataset.pick);
-      }));
-    });
+  $("#calc-copy").addEventListener("click", async () => {
+    await navigator.clipboard.writeText(listText);
+    toast("Kopierat!");
+  });
+
+  $("#calc-save").addEventListener("click", () => {
+    const saveTo = jobId => {
+      getJob(jobId).material.push({ label, calcKey: calcKey || null, items: res.items, totalLow: res.totalLow, totalHigh: res.totalHigh, ts: Date.now() });
+      store.save();
+      toast("Sparat på jobbet");
+      calcSelected = null; calcTargetJob = null;
+      navTo("jobs");
+      showJob(jobId);
+    };
+    if (calcTargetJob) { saveTo(calcTargetJob); return; }
+    if (state.jobs.length === 0) { toast("Skapa ett jobb först"); return; }
+    modal(`
+      <div class="modal-head"><h2>Spara på vilket jobb?</h2><button class="btn-icon" data-close>✕</button></div>
+      ${state.jobs.slice().sort((a, b) => b.skapad - a.skapad).map(jb =>
+        `<div class="card tappable" data-pick="${jb.id}"><strong>${esc(jb.namn)}</strong> <span class="badge ${jb.status}">${STATUS_LABEL[jb.status]}</span></div>`).join("")}
+    `);
+    document.querySelectorAll("[data-pick]").forEach(c => c.addEventListener("click", () => {
+      closeModal(); saveTo(c.dataset.pick);
+    }));
+  });
+}
+
+/* ---------- AI-fritextläge ---------- */
+
+function renderAICalc() {
+  const v = $("#view");
+  const hasKey = !!state.settings.apiKey;
+  v.innerHTML = `
+    <button class="btn sm secondary" id="calc-back" style="margin-bottom:12px">← Alla jobbtyper</button>
+    <div class="card">
+      <h2>✨ Beskriv jobbet fritt</h2>
+      ${hasKey ? "" : `<div class="warn">Kräver en Anthropic API-nyckel — lägg in den under ⚙ Inställningar.</div>`}
+      <label class="field"><textarea id="ai-text" rows="5" placeholder="T.ex: Ska lägga klinker i ett badrum, 4×2,5 meter, lite krånglig form med en pelare i hörnet. Golvvärme finns."></textarea></label>
+      <button class="btn block" id="ai-run" ${hasKey ? "" : "disabled"}>Beräkna med AI</button>
+      <p class="muted" style="margin-top:8px">Beskrivningen skickas till Claude API med din egen nyckel. Ta med mått, underlag och annat som påverkar åtgången.</p>
+    </div>
+    <div id="calc-result"></div>`;
+
+  $("#calc-back").addEventListener("click", () => { calcSelected = null; renderCalc(); });
+  $("#ai-run").addEventListener("click", async () => {
+    const text = $("#ai-text").value.trim();
+    if (!text) { toast("Beskriv jobbet först"); return; }
+    const btn = $("#ai-run");
+    btn.disabled = true;
+    btn.textContent = "Beräknar…";
+    try {
+      const res = await aiMaterialSuggest(text, state.settings.apiKey);
+      renderCalcResult(res, res.label, null);
+    } catch (e) {
+      $("#calc-result").innerHTML = `<div class="warn">⚠ ${esc(e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Beräkna med AI";
+    }
   });
 }
 
@@ -418,7 +512,7 @@ function matTable(res) {
     <tr><th>Material</th><th>Åtgång</th></tr>
     ${res.items.map(i => `<tr>
       <td>${esc(i.name)}${i.pkg ? `<div class="muted">${esc(i.pkg)}</div>` : ""}</td>
-      <td class="qty">${i.qty} ${i.unit}</td>
+      <td class="qty">${i.qty} ${i.unit}${i.calibrated ? " 📈" : ""}</td>
     </tr>`).join("")}
   </table>`;
 }
@@ -553,15 +647,54 @@ function showSettings() {
     <div class="modal-head"><h2>Inställningar</h2><button class="btn-icon" data-close>✕</button></div>
     <label class="field"><span>Timpris (kr/h, inkl. moms)</span><input id="s-timpris" type="number" inputmode="numeric" value="${state.settings.timpris}"></label>
     <label class="field"><span>Företagsnamn</span><input id="s-foretag" value="${esc(state.settings.foretag)}"></label>
+    <label class="field"><span>Anthropic API-nyckel (för AI-fritextläget)</span>
+      <input id="s-apikey" type="password" value="${esc(state.settings.apiKey)}" placeholder="sk-ant-...">
+      <div class="muted" style="margin-top:3px">Skapa på console.anthropic.com. Sparas bara lokalt på den här enheten.</div></label>
     <button class="btn block" id="s-save">Spara</button>
-    <p class="muted" style="margin-top:14px">All data sparas lokalt i webbläsaren på den här enheten.</p>
+    <h3 style="margin-top:18px">Säkerhetskopiering</h3>
+    <p class="muted" style="margin-bottom:8px">All data sparas lokalt i webbläsaren. Exportera regelbundet, eller flytta data till en annan enhet.</p>
+    <button class="btn block secondary" id="s-export">⬇ Exportera all data</button>
+    <button class="btn block secondary" id="s-import" style="margin-top:8px">⬆ Importera data</button>
+    <input type="file" id="s-file" accept=".json,application/json" style="display:none">
   `);
   $("#s-save").addEventListener("click", () => {
     state.settings.timpris = parseFloat($("#s-timpris").value) || 650;
     state.settings.foretag = $("#s-foretag").value.trim();
+    state.settings.apiKey = $("#s-apikey").value.trim();
     store.save();
     closeModal();
     toast("Sparat");
+  });
+  $("#s-export").addEventListener("click", () => {
+    const data = { ...state };
+    delete data.activeTimer;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "hantverkarassistenten-" + new Date().toISOString().slice(0, 10) + ".json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast("Exporterad");
+  });
+  $("#s-import").addEventListener("click", () => $("#s-file").click());
+  $("#s-file").addEventListener("change", async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (!Array.isArray(data.jobs)) throw new Error("fel format");
+      if (!confirm(`Importera ${data.jobs.length} jobb? Ersätter all nuvarande data.`)) return;
+      state.jobs = data.jobs;
+      state.calibration = data.calibration || {};
+      state.settings = Object.assign(state.settings, data.settings || {});
+      state.activeTimer = null;
+      store.save();
+      closeModal();
+      render();
+      toast("Importerad");
+    } catch {
+      toast("Kunde inte läsa filen");
+    }
   });
 }
 
