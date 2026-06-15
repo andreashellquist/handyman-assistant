@@ -56,6 +56,22 @@ az functionapp config appsettings set -n handyman-fn-<unikt> -g handyman-rg --se
 
 Övriga URL:er/scopes har defaultvärden i `ProviderRegistry` via `local.settings.json.example` — sätt dem som App Settings om de behöver avvika.
 
+### Automatisk deploy (GitHub Actions)
+
+`.github/workflows/deploy-api.yml` bygger och deployar `api/` automatiskt vid push till `main` (när något under `api/` ändras), samt manuellt via *Run workflow*. Sätt upp en gång:
+
+1. **Repo-variabel** (Settings → Secrets and variables → Actions → *Variables*):
+   - `AZURE_FUNCTIONAPP_NAME` = namnet på din funktionsapp (t.ex. `handyman-fn-<unikt>`)
+2. **Repo-secret** (samma sida → *Secrets*):
+   - `AZURE_FUNCTIONAPP_PUBLISH_PROFILE` = innehållet i publish-profilen:
+     ```bash
+     az functionapp deployment list-publishing-profiles \
+       -n handyman-fn-<unikt> -g handyman-rg --xml
+     ```
+     Klistra in hela XML-utskriften som secret-värde.
+
+Workflowen hoppar över sig själv om `AZURE_FUNCTIONAPP_NAME` saknas (så forkar utan Azure inte rödflaggas). App Settings (secrets/URL:er) sätts separat enligt ovan — de rörs inte av deployen.
+
 ## 4. Koppla appen
 
 I appen → ⚙ Inställningar:
