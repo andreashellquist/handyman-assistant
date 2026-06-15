@@ -12,11 +12,11 @@ const state = Object.assign({
   jobs: [],            // {id, namn, kund, telefon, adress, status, skapad, notes[], material[], time[], checklist[], equipment[], estHours}
   activeTimer: null,   // {jobId, start}
   calibration: {},     // "<calcKey>|<normItem>" -> {avg, n} — faktisk/beräknad åtgång
-  settings: { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "" },
+  settings: { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "", fakturasystem: "ingen", kundnr: "" },
   lastExport: 0,
 }, store.load());
 state.calibration = state.calibration || {};
-const DEF_SETTINGS = { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "" };
+const DEF_SETTINGS = { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "", fakturasystem: "ingen", kundnr: "" };
 state.settings = Object.assign({}, DEF_SETTINGS, state.settings);
 // migrera äldre jobb till nya fält
 state.jobs.forEach(j => { j.equipment = j.equipment || []; });
@@ -484,7 +484,11 @@ function renderInvoice(jobId) {
     </div>
 
     <button class="btn block" id="inv-copy">📋 Kopiera underlag</button>
-    <button class="btn block secondary" id="inv-csv" style="margin-top:8px">⬇ Ladda ner CSV (för Fortnox/Visma m.fl.)</button>
+    <button class="btn block secondary" id="inv-csv" style="margin-top:8px">⬇ Ladda ner CSV (generiskt)</button>
+    <div class="row" style="margin-top:8px; gap:8px">
+      <button class="btn secondary grow" data-sys="fortnox">Förbered för Fortnox</button>
+      <button class="btn secondary grow" data-sys="visma">Förbered för Visma</button>
+    </div>
     <p class="muted" style="margin-top:10px">Underlaget ersätter inte ditt fakturasystem — det matar in radposterna. Materialbelopp är riktprisernas mittvärde; justera mot kvitto i fakturasystemet. ROT förutsätter att kunden har avdragsutrymme kvar (max 50 000 kr/person/år) och söks via ditt fakturasystem.</p>
   `);
 
@@ -500,6 +504,36 @@ function renderInvoice(jobId) {
     toast("Kopierat!");
   });
   $("#inv-csv").addEventListener("click", () => downloadCSV(j, rows));
+  document.querySelectorAll("[data-sys]").forEach(b =>
+    b.addEventListener("click", () => showSystemPayload(b.dataset.sys, j, rows)));
+}
+
+/* Förbereder och visar systemspecifik payload (Fortnox/Visma). */
+function showSystemPayload(system, j, rows) {
+  const payload = buildSystemPayload(system, j, rows, state.settings);
+  const json = JSON.stringify(payload, null, 2);
+  const name = INVOICE_SYSTEMS[system];
+  modal(`
+    <div class="modal-head"><h2>${esc(name)}</h2><button class="btn-icon" data-close>✕</button></div>
+    <div class="warn">Automatisk uppladdning kräver en OAuth-koppling via en liten backend — ${esc(name)} tillåter inte säkra anrop direkt från webbläsaren. Payloaden nedan är fältmappad och redo att skickas till ${esc(name)} API när kopplingen finns.</div>
+    <div class="card" style="overflow-x:auto"><pre style="font-size:12px;font-family:ui-monospace,monospace;white-space:pre">${esc(json)}</pre></div>
+    <button class="btn block" id="sp-copy">📋 Kopiera payload</button>
+    <button class="btn block secondary" id="sp-dl" style="margin-top:8px">⬇ Ladda ner JSON</button>
+    <p class="muted" style="margin-top:10px">Kontoförslag (BAS) och momskoder är standardvärden — verifiera mot din kontoplan. ROT-rader är markerade${system === "fortnox" ? " med HouseWork/HouseWorkType" : " med IsWork"}.</p>
+  `);
+  $("#sp-copy").addEventListener("click", async () => {
+    await navigator.clipboard.writeText(json);
+    toast("Kopierat!");
+  });
+  $("#sp-dl").addEventListener("click", () => {
+    const blob = new Blob([json], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = system + "-" + (j.namn || "jobb").replace(/[^\wåäöÅÄÖ]+/g, "_") + ".json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast("Nedladdad");
+  });
 }
 
 function invoiceText(j, rows, t) {
@@ -901,6 +935,11 @@ function showSettings() {
         <select id="s-fskatt"><option value="1" ${state.settings.fskatt ? "selected" : ""}>Ja</option><option value="0" ${!state.settings.fskatt ? "selected" : ""}>Nej</option></select></label>
     </div>
     <label class="field"><span>Företagsadress</span><input id="s-fadress" value="${esc(state.settings.foretagAdress)}" placeholder="Gata, postnr ort"></label>
+    <label class="field"><span>Fakturasystem</span>
+      <select id="s-system">${Object.entries(INVOICE_SYSTEMS).map(([k, l]) =>
+        `<option value="${k}" ${state.settings.fakturasystem === k ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <div class="muted" style="margin-top:3px">Styr vilket importformat fakturaunderlaget förbereds för.</div></label>
+    <label class="field"><span>Kundnummer i fakturasystemet (valfritt)</span><input id="s-kundnr" value="${esc(state.settings.kundnr)}" placeholder="t.ex. 1001"></label>
     <label class="field"><span>Anthropic API-nyckel (för AI-fritextläget)</span>
       <input id="s-apikey" type="password" value="${esc(state.settings.apiKey)}" placeholder="sk-ant-...">
       <div class="muted" style="margin-top:3px">Skapa på console.anthropic.com. Sparas bara lokalt på den här enheten.</div></label>
@@ -917,6 +956,8 @@ function showSettings() {
     state.settings.orgnr = $("#s-orgnr").value.trim();
     state.settings.fskatt = $("#s-fskatt").value === "1";
     state.settings.foretagAdress = $("#s-fadress").value.trim();
+    state.settings.fakturasystem = $("#s-system").value;
+    state.settings.kundnr = $("#s-kundnr").value.trim();
     state.settings.apiKey = $("#s-apikey").value.trim();
     store.save();
     closeModal();
