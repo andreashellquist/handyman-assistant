@@ -12,7 +12,7 @@ const state = Object.assign({
   jobs: [],            // {id, namn, kund, telefon, adress, status, skapad, notes[], material[], time[], checklist[], equipment[], estHours}
   activeTimer: null,   // {jobId, start}
   calibration: {},     // "<calcKey>|<normItem>" -> {avg, n} — faktisk/beräknad åtgång
-  settings: { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "", fakturasystem: "ingen", kundnr: "" },
+  settings: { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "", fakturasystem: "ingen", kundnr: "", backendUrl: "", backendKey: "" },
   lastExport: 0,
 }, store.load());
 state.calibration = state.calibration || {};
@@ -517,9 +517,15 @@ function showSystemPayload(system, j, rows) {
     <div class="modal-head"><h2>${esc(name)}</h2><button class="btn-icon" data-close>✕</button></div>
     <div class="warn">Automatisk uppladdning kräver en OAuth-koppling via en liten backend — ${esc(name)} tillåter inte säkra anrop direkt från webbläsaren. Payloaden nedan är fältmappad och redo att skickas till ${esc(name)} API när kopplingen finns.</div>
     <div class="card" style="overflow-x:auto"><pre style="font-size:12px;font-family:ui-monospace,monospace;white-space:pre">${esc(json)}</pre></div>
-    <button class="btn block" id="sp-copy">📋 Kopiera payload</button>
+    ${state.settings.backendUrl ? `
+      <div class="row" style="gap:8px">
+        <button class="btn secondary grow" id="sp-connect">🔗 Anslut ${esc(name)}</button>
+        <button class="btn grow" id="sp-send">📤 Skicka till ${esc(name)}</button>
+      </div>
+      <div id="sp-status" class="muted" style="margin-top:8px"></div>` : ""}
+    <button class="btn block ${state.settings.backendUrl ? "secondary" : ""}" id="sp-copy" style="margin-top:8px">📋 Kopiera payload</button>
     <button class="btn block secondary" id="sp-dl" style="margin-top:8px">⬇ Ladda ner JSON</button>
-    <p class="muted" style="margin-top:10px">Kontoförslag (BAS) och momskoder är standardvärden — verifiera mot din kontoplan. ROT-rader är markerade${system === "fortnox" ? " med HouseWork/HouseWorkType" : " med IsWork"}.</p>
+    <p class="muted" style="margin-top:10px">Kontoförslag (BAS) och momskoder är standardvärden — verifiera mot din kontoplan. ROT-rader är markerade${system === "fortnox" ? " med HouseWork/HouseWorkType" : " med IsWork"}.${state.settings.backendUrl ? "" : " Lägg in backend-URL i inställningar för att skicka direkt."}</p>
   `);
   $("#sp-copy").addEventListener("click", async () => {
     await navigator.clipboard.writeText(json);
@@ -534,6 +540,41 @@ function showSystemPayload(system, j, rows) {
     URL.revokeObjectURL(a.href);
     toast("Nedladdad");
   });
+
+  if (state.settings.backendUrl) {
+    $("#sp-connect").addEventListener("click", () => {
+      window.open(`${state.settings.backendUrl}/api/auth/${system}/start`, "_blank");
+    });
+    $("#sp-send").addEventListener("click", async () => {
+      const status = $("#sp-status");
+      const btn = $("#sp-send");
+      btn.disabled = true; status.textContent = "Skickar…";
+      try {
+        const resp = await fetch(`${state.settings.backendUrl}/api/invoice/${system}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-app-key": state.settings.backendKey },
+          body: json,
+        });
+        const txt = await resp.text();
+        if (resp.ok) {
+          status.style.color = "var(--green)";
+          status.textContent = "✅ Skickat till " + name + ".";
+          toast("Skickat!");
+        } else if (resp.status === 401 && /inte anslutet/i.test(txt)) {
+          status.style.color = "var(--accent)";
+          status.textContent = "⚠ Inte anslutet — tryck Anslut " + name + " först.";
+        } else {
+          status.style.color = "var(--red)";
+          status.textContent = "Fel från " + name + " (" + resp.status + "): " + txt.slice(0, 200);
+        }
+      } catch (e) {
+        status.style.color = "var(--red)";
+        status.textContent = "Kunde inte nå backenden: " + e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
 }
 
 function invoiceText(j, rows, t) {
@@ -940,6 +981,10 @@ function showSettings() {
         `<option value="${k}" ${state.settings.fakturasystem === k ? "selected" : ""}>${l}</option>`).join("")}</select>
       <div class="muted" style="margin-top:3px">Styr vilket importformat fakturaunderlaget förbereds för.</div></label>
     <label class="field"><span>Kundnummer i fakturasystemet (valfritt)</span><input id="s-kundnr" value="${esc(state.settings.kundnr)}" placeholder="t.ex. 1001"></label>
+    <label class="field"><span>Backend-URL (Azure Functions, för auto-uppladdning)</span>
+      <input id="s-backurl" value="${esc(state.settings.backendUrl)}" placeholder="https://din-funktion.azurewebsites.net">
+      <div class="muted" style="margin-top:3px">Lämna tomt för att bara kopiera/ladda ner payloaden.</div></label>
+    <label class="field"><span>App-nyckel (x-app-key)</span><input id="s-backkey" type="password" value="${esc(state.settings.backendKey)}" placeholder="delas med backenden"></label>
     <label class="field"><span>Anthropic API-nyckel (för AI-fritextläget)</span>
       <input id="s-apikey" type="password" value="${esc(state.settings.apiKey)}" placeholder="sk-ant-...">
       <div class="muted" style="margin-top:3px">Skapa på console.anthropic.com. Sparas bara lokalt på den här enheten.</div></label>
@@ -958,6 +1003,8 @@ function showSettings() {
     state.settings.foretagAdress = $("#s-fadress").value.trim();
     state.settings.fakturasystem = $("#s-system").value;
     state.settings.kundnr = $("#s-kundnr").value.trim();
+    state.settings.backendUrl = $("#s-backurl").value.trim().replace(/\/$/, "");
+    state.settings.backendKey = $("#s-backkey").value.trim();
     state.settings.apiKey = $("#s-apikey").value.trim();
     store.save();
     closeModal();

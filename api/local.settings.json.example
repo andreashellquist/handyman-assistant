@@ -1,0 +1,28 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+
+    "APP_API_KEY": "valfri-lang-slumpsträng-delas-med-frontenden",
+    "REDIRECT_BASE": "http://localhost:7071",
+    "TABLES_CONNECTION": "",
+
+    "FORTNOX_CLIENT_ID": "",
+    "FORTNOX_CLIENT_SECRET": "",
+    "FORTNOX_SCOPES": "invoice customer",
+    "FORTNOX_AUTH_URL": "https://apps.fortnox.se/oauth-v1/auth",
+    "FORTNOX_TOKEN_URL": "https://apps.fortnox.se/oauth-v1/token",
+    "FORTNOX_INVOICE_URL": "https://api.fortnox.se/3/invoices",
+
+    "VISMA_CLIENT_ID": "",
+    "VISMA_CLIENT_SECRET": "",
+    "VISMA_SCOPES": "ea:api ea:sales offline_access",
+    "VISMA_AUTH_URL": "https://identity.vismaonline.com/connect/authorize",
+    "VISMA_TOKEN_URL": "https://identity.vismaonline.com/connect/token",
+    "VISMA_INVOICE_URL": "https://eaccountingapi.vismaonline.com/v2/customerinvoices"
+  },
+  "Host": {
+    "CORS": "*"
+  }
+}
