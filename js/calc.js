@@ -292,7 +292,7 @@ function runCalc(jobKey, values, calibration) {
   const res = job.compute(values);
   if (calibration) {
     res.items.forEach(i => {
-      const cal = calibration[jobKey + "|" + i.name];
+      const cal = calibration[jobKey + "|" + (typeof normItem === "function" ? normItem(i.name) : i.name)];
       if (cal && cal.n >= 1 && Math.abs(cal.avg - 1) > 0.03) {
         const factor = Math.min(2, Math.max(0.5, cal.avg));
         i.qty = Math.ceil(i.qty * factor * 10) / 10;

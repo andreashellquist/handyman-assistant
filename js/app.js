@@ -9,17 +9,27 @@ const store = {
 };
 
 const state = Object.assign({
-  jobs: [],            // {id, namn, kund, telefon, adress, status, skapad, notes[], material[], time[], checklist[], timpris}
+  jobs: [],            // {id, namn, kund, telefon, adress, status, skapad, notes[], material[], time[], checklist[], equipment[], estHours}
   activeTimer: null,   // {jobId, start}
-  calibration: {},     // "<calcKey>|<itemName>" -> {avg, n} — faktisk/beräknad åtgång
-  settings: { timpris: 650, foretag: "", apiKey: "" },
+  calibration: {},     // "<calcKey>|<normItem>" -> {avg, n} — faktisk/beräknad åtgång
+  settings: { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "" },
+  lastExport: 0,
 }, store.load());
 state.calibration = state.calibration || {};
-state.settings.apiKey = state.settings.apiKey || "";
+const DEF_SETTINGS = { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "" };
+state.settings = Object.assign({}, DEF_SETTINGS, state.settings);
+// migrera äldre jobb till nya fält
+state.jobs.forEach(j => { j.equipment = j.equipment || []; });
+
+/* Stabil kalibreringsnyckel: tar bort siffror, mått och parenteser ur namnet
+   så "Regel 70 mm (h=2,5 m)" och "Regel 70 mm (h=2,4 m)" matchar varandra. */
+const normItem = name => String(name).replace(/\(.*?\)/g, "").replace(/[\d.,×x]+/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 
 const STATUS = ["offert", "pagaende", "klart", "fakturerat"];
 const STATUS_LABEL = { offert: "Offert", pagaende: "Pågående", klart: "Klart", fakturerat: "Fakturerat" };
 const NOTE_TYPES = { material: "Material", problem: "Problem/avvikelse", sub: "Subentreprenör", ovrigt: "Övrigt" };
+const EQ_TYPES = { maskin: "Maskin/verktyg", stallning: "Ställning/lift", hjalp: "Extra man/hjälp", sub: "Underentreprenör", ovrigt: "Övrigt" };
+const EQ_ICON = { maskin: "🛠", stallning: "🪜", hjalp: "👷", sub: "🤝", ovrigt: "📦" };
 
 let nav = "jobs";
 let jobFilter = "alla";
@@ -65,7 +75,9 @@ function renderJobs() {
     .filter(j => jobFilter === "alla" || j.status === jobFilter)
     .sort((a, b) => b.skapad - a.skapad);
 
+  const needsBackup = state.jobs.length > 0 && (Date.now() - (state.lastExport || 0)) > 14 * 864e5;
   v.innerHTML = `
+    ${needsBackup ? `<div class="warn" id="backup-nudge" style="cursor:pointer">💾 Dags att säkerhetskopiera — data ligger bara lokalt. Tryck för att exportera.</div>` : ""}
     <div class="seg">
       ${["alla", ...STATUS].map(s =>
         `<button data-f="${s}" class="${jobFilter === s ? "active" : ""}">${s === "alla" ? "Alla" : STATUS_LABEL[s]}</button>`).join("")}
@@ -94,6 +106,7 @@ function renderJobs() {
   v.querySelectorAll("[data-f]").forEach(b => b.addEventListener("click", () => { jobFilter = b.dataset.f; renderJobs(); }));
   v.querySelectorAll("[data-job]").forEach(c => c.addEventListener("click", () => showJob(c.dataset.job)));
   $("#fab-add").addEventListener("click", showNewJob);
+  if ($("#backup-nudge")) $("#backup-nudge").addEventListener("click", exportData);
 }
 
 function showNewJob() {
@@ -160,7 +173,9 @@ function showJob(id) {
       ${j.notes.length === 0 ? `<div class="muted">Inga anteckningar.</div>` :
         j.notes.slice().reverse().map(n => `
         <div class="note ${n.type}">
-          <div>${esc(n.text)}</div>
+          ${n.text ? `<div>${esc(n.text)}</div>` : ""}
+          ${n.photos?.length ? `<div class="photo-row">${n.photos.map((p, pi) =>
+            `<img src="${p}" class="thumb" data-photo="${n.id}:${pi}">`).join("")}</div>` : ""}
           <div class="note-meta">${NOTE_TYPES[n.type]} · ${dateStr(n.ts)} <button class="btn-icon" style="font-size:13px;padding:0 4px" data-delnote="${n.id}">🗑</button></div>
         </div>`).join("")}
     </div>
@@ -196,7 +211,21 @@ function showJob(id) {
         </div>`).join("")}
     </div>
 
-    <button class="btn block" id="jb-offert" style="margin-bottom:8px">📄 Skapa offertunderlag</button>
+    <div class="card">
+      <div class="row" style="margin-bottom:6px">
+        <h3 class="grow" style="margin:0">Maskiner & hjälp</h3>
+        <button class="btn sm secondary" id="jb-addeq">+ Lägg till</button>
+      </div>
+      ${j.equipment.length === 0 ? `<div class="muted">Inget planerat. T.ex. bilningsmaskin, ställning, extra man, container.</div>` :
+        j.equipment.map((e, i) => `
+        <div class="checklist-item ${e.done ? "done" : ""}">
+          <input type="checkbox" data-eqdone="${i}" ${e.done ? "checked" : ""}>
+          <span class="grow">${EQ_ICON[e.type] || ""} ${esc(e.text)}${e.cost ? ` · ${kr(e.cost)}` : ""}</span>
+          <button class="btn-icon" style="font-size:13px" data-deleq="${i}">🗑</button>
+        </div>`).join("")}
+    </div>
+
+    <button class="btn block" id="jb-offert" style="margin-bottom:8px">📄 Faktura-/offertunderlag</button>
     <button class="btn block danger" id="jb-del">Ta bort jobb</button>
   `);
 
@@ -219,6 +248,9 @@ function showJob(id) {
   document.querySelectorAll("[data-delnote]").forEach(b => b.addEventListener("click", () => {
     j.notes = j.notes.filter(n => n.id !== b.dataset.delnote); store.save(); showJob(id);
   }));
+  document.querySelectorAll("[data-photo]").forEach(img => img.addEventListener("click", () => {
+    modal(`<div class="modal-head"><h2>Foto</h2><button class="btn-icon" data-close>✕</button></div><img src="${img.src}" style="width:100%;border-radius:10px">`);
+  }));
 
   $("#jb-calc").addEventListener("click", () => { closeModal(); navTo("calc", id); });
   document.querySelectorAll("[data-delmat]").forEach(b => b.addEventListener("click", () => {
@@ -237,12 +269,38 @@ function showJob(id) {
     j.checklist.splice(+b.dataset.delcheck, 1); store.save(); showJob(id);
   }));
 
+  $("#jb-addeq").addEventListener("click", () => showAddEquipment(id));
+  document.querySelectorAll("[data-eqdone]").forEach(c => c.addEventListener("change", () => {
+    j.equipment[+c.dataset.eqdone].done = c.checked; store.save(); showJob(id);
+  }));
+  document.querySelectorAll("[data-deleq]").forEach(b => b.addEventListener("click", () => {
+    j.equipment.splice(+b.dataset.deleq, 1); store.save(); showJob(id);
+  }));
+
   $("#jb-offert").addEventListener("click", () => showOffert(id));
   $("#jb-del").addEventListener("click", () => {
     if (!confirm(`Ta bort "${j.namn}" och allt som hör till?`)) return;
     state.jobs = state.jobs.filter(x => x.id !== id);
     if (state.activeTimer?.jobId === id) state.activeTimer = null;
     store.save(); closeModal(); render();
+  });
+}
+
+/* Läser en bildfil, skalar ner till max 1280 px och returnerar komprimerad
+   JPEG-dataURL — håller localStorage litet. */
+function compressImage(file, maxDim = 1280, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * scale);
+      c.height = Math.round(img.height * scale);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
   });
 }
 
@@ -253,20 +311,57 @@ function showAddNote(jobId) {
       ${Object.entries(NOTE_TYPES).map(([k, l], i) => `<button data-nt="${k}" class="${i === 0 ? "active" : ""}">${l}</button>`).join("")}
     </div>
     <label class="field"><textarea id="an-text" rows="4" placeholder="Skriv eller diktera (mikrofonen på tangentbordet)…" autofocus></textarea></label>
-    <button class="btn block" id="an-save">Spara</button>
+    <button class="btn block secondary" id="an-photo">📷 Lägg till foto</button>
+    <input type="file" id="an-file" accept="image/*" capture="environment" multiple style="display:none">
+    <div class="photo-row" id="an-thumbs" style="margin-top:10px"></div>
+    <button class="btn block" id="an-save" style="margin-top:10px">Spara</button>
   `);
   let noteType = "material";
+  const photos = [];
   document.querySelectorAll("[data-nt]").forEach(b => b.addEventListener("click", () => {
     noteType = b.dataset.nt;
     document.querySelectorAll("[data-nt]").forEach(x => x.classList.toggle("active", x === b));
   }));
+  $("#an-photo").addEventListener("click", () => $("#an-file").click());
+  $("#an-file").addEventListener("change", async e => {
+    for (const file of e.target.files) {
+      try { photos.push(await compressImage(file)); } catch { toast("Kunde inte läsa bilden"); }
+    }
+    $("#an-thumbs").innerHTML = photos.map(p => `<img src="${p}" class="thumb">`).join("");
+  });
   $("#an-save").addEventListener("click", () => {
     const text = $("#an-text").value.trim();
-    if (!text) { toast("Skriv något först"); return; }
-    getJob(jobId).notes.push({ id: uid(), type: noteType, text, ts: Date.now() });
+    if (!text && photos.length === 0) { toast("Skriv något eller lägg till foto"); return; }
+    getJob(jobId).notes.push({ id: uid(), type: noteType, text, photos, ts: Date.now() });
     store.save();
     showJob(jobId);
     toast("Sparat");
+  });
+}
+
+/* ---------- Maskiner & hjälp ---------- */
+
+function showAddEquipment(jobId) {
+  modal(`
+    <div class="modal-head"><h2>Maskin / hjälp</h2><button class="btn-icon" data-close>✕</button></div>
+    <label class="field"><span>Typ</span><select id="eq-type">
+      ${Object.entries(EQ_TYPES).map(([k, l]) => `<option value="${k}">${EQ_ICON[k]} ${l}</option>`).join("")}
+    </select></label>
+    <label class="field"><span>Vad behövs?</span><input id="eq-text" placeholder="t.ex. Bilningsmaskin (hyra Ramirent)" autofocus></label>
+    <label class="field"><span>Uppskattad kostnad (kr, valfritt)</span><input id="eq-cost" type="number" inputmode="numeric" min="0" placeholder="0"></label>
+    <button class="btn block" id="eq-save">Lägg till</button>
+    <p class="muted" style="margin-top:10px">Hamnar som planeringspunkt på jobbet och som rad i fakturaunderlaget om du anger en kostnad.</p>
+  `);
+  $("#eq-save").addEventListener("click", () => {
+    const text = $("#eq-text").value.trim();
+    if (!text) { toast("Beskriv vad som behövs"); return; }
+    getJob(jobId).equipment.push({
+      text, type: $("#eq-type").value,
+      cost: parseFloat($("#eq-cost").value) || 0, done: false,
+    });
+    store.save();
+    showJob(jobId);
+    toast("Tillagt");
   });
 }
 
@@ -291,7 +386,7 @@ function showLogActual(jobId, matIndex) {
       const item = m.items[+el.dataset.actual];
       item.actual = actual;
       if (m.calcKey && item.qty > 0) {
-        const key = m.calcKey + "|" + item.name;
+        const key = m.calcKey + "|" + normItem(item.name);
         const cal = state.calibration[key] || { avg: 1, n: 0 };
         const ratio = actual / item.qty;
         cal.avg = (cal.avg * cal.n + ratio) / (cal.n + 1);
@@ -305,49 +400,146 @@ function showLogActual(jobId, matIndex) {
   });
 }
 
-/* ---------- Offertunderlag ---------- */
+/* ---------- Faktura-/offertunderlag (nivå 1) ---------- */
+
+const MOMS = 0.25; // 25 % moms
+const exMoms = inkl => inkl / (1 + MOMS);
+
+/* Bygger radposter ur ett jobb. hours = arbetstimmar att fakturera (loggat
+   eller uppskattat för fastpris). Priser i appen är inkl. moms → räknas till
+   netto (ex moms). ROT gäller endast arbete. */
+function buildInvoiceRows(j, hours) {
+  const rows = [];
+  // Material — mittvärde av riktprisspannet per rad (justeras mot kvitto i fakturasystemet)
+  j.material.forEach(m => {
+    m.items.forEach(i => {
+      const mid = ((i.priceLow || 0) + (i.priceHigh || 0)) / 2;
+      if (mid <= 0) return;
+      rows.push({
+        typ: "Material", desc: i.name, qty: i.qty, unit: i.unit,
+        netTotal: exMoms(mid), rot: false,
+      });
+    });
+  });
+  // Maskiner & hjälp med angiven kostnad
+  j.equipment.forEach(e => {
+    if (e.cost > 0) rows.push({
+      typ: EQ_TYPES[e.type] || "Övrigt", desc: e.text, qty: 1, unit: "st",
+      netTotal: exMoms(e.cost), rot: false,
+    });
+  });
+  // Arbete (ROT-grundande)
+  if (hours > 0) rows.push({
+    typ: "Arbete", desc: "Arbetstid", qty: Math.round(hours * 100) / 100, unit: "h",
+    netTotal: exMoms(hours * state.settings.timpris), rot: true,
+  });
+  return rows;
+}
+
+function invoiceTotals(rows) {
+  const net = rows.reduce((s, r) => s + r.netTotal, 0);
+  const labourNet = rows.filter(r => r.rot).reduce((s, r) => s + r.netTotal, 0);
+  const labourInkl = labourNet * (1 + MOMS);
+  const rot = Math.min(labourInkl * 0.5, 50000); // 50 % av arbete inkl. moms, tak 50 000 kr/person/år
+  return { net, moms: net * MOMS, brutto: net * (1 + MOMS), rot, attBetala: net * (1 + MOMS) - rot };
+}
 
 function showOffert(jobId) {
   const j = getJob(jobId);
-  const min = totalMin(j);
-  const arbKost = min / 60 * state.settings.timpris;
-  let matLow = 0, matHigh = 0;
-  j.material.forEach(m => { matLow += m.totalLow; matHigh += m.totalHigh; });
-  const rot = Math.round(arbKost * 0.5); // ROT: 50 % av arbetskostnaden (max 50 000 kr/person/år)
+  if (j.estHours == null) j.estHours = Math.round(totalMin(j) / 60 * 100) / 100;
+  renderInvoice(jobId);
+}
 
-  const lines = [];
-  lines.push(`OFFERTUNDERLAG – ${j.namn}`);
-  if (j.kund) lines.push(`Kund: ${j.kund}${j.adress ? ", " + j.adress : ""}`);
-  lines.push("");
-  if (j.material.length) {
-    lines.push("MATERIAL");
-    j.material.forEach(m => {
-      lines.push(`  ${m.label}:`);
-      m.items.forEach(i => lines.push(`    • ${i.name}: ${i.qty} ${i.unit}${i.pkg ? " (" + i.pkg + ")" : ""}`));
-    });
-    lines.push(`  Materialkostnad (uppskattad): ${kr(matLow)}–${kr(matHigh)}`);
-    lines.push("");
-  }
-  if (min > 0) {
-    lines.push(`ARBETE`);
-    lines.push(`  ${fmtMin(min)} à ${state.settings.timpris} kr/h = ${kr(arbKost)}`);
-    lines.push(`  Möjligt ROT-avdrag (50 % av arbete): −${kr(rot)}`);
-    lines.push("");
-  }
-  lines.push(`SUMMA (exkl. ROT): ${kr(arbKost + matLow)}–${kr(arbKost + matHigh)}`);
-  if (min > 0) lines.push(`SUMMA (efter ROT): ${kr(arbKost - rot + matLow)}–${kr(arbKost - rot + matHigh)}`);
-  const text = lines.join("\n");
+function renderInvoice(jobId) {
+  const j = getJob(jobId);
+  const loggat = Math.round(totalMin(j) / 60 * 100) / 100;
+  const hours = j.estHours > 0 ? j.estHours : loggat;
+  const rows = buildInvoiceRows(j, hours);
+  const t = invoiceTotals(rows);
+  const s = state.settings;
 
   modal(`
-    <div class="modal-head"><h2>Offertunderlag</h2><button class="btn-icon" data-close>✕</button></div>
-    <div class="card"><pre style="white-space:pre-wrap;font-size:13px;font-family:ui-monospace,monospace">${esc(text)}</pre></div>
-    <button class="btn block" id="of-copy">📋 Kopiera till urklipp</button>
-    <p class="muted" style="margin-top:10px">Tider är loggade timmar hittills. För fastprisoffert: justera arbetstiden till uppskattad total innan du skickar. ROT-avdraget förutsätter att kunden har utrymme kvar (max 50 000 kr/person/år).</p>
+    <div class="modal-head"><h2>Fakturaunderlag</h2><button class="btn-icon" data-close>✕</button></div>
+    ${!s.foretag ? `<div class="warn">Fyll i företagsuppgifter under ⚙ Inställningar så kommer de med i underlaget.</div>` : ""}
+    <label class="field"><span>Arbetstimmar att fakturera (loggat: ${loggat} h)</span>
+      <input id="inv-hours" type="number" inputmode="decimal" step="0.5" min="0" value="${hours}">
+      <div class="muted" style="margin-top:3px">Justera till uppskattad total för fastprisofferter.</div></label>
+    <button class="btn sm secondary" id="inv-upd" style="margin-bottom:12px">Uppdatera summor</button>
+
+    <div class="card" style="overflow-x:auto">
+      <table class="mat-table">
+        <tr><th>Beskrivning</th><th>Antal</th><th>Belopp ex moms</th></tr>
+        ${rows.length === 0 ? `<tr><td colspan="3" class="muted">Inga rader ännu — lägg till material, maskiner eller logga tid.</td></tr>` :
+          rows.map(r => `<tr>
+            <td>${esc(r.desc)}<div class="muted">${esc(r.typ)}${r.rot ? " · ROT" : ""}</div></td>
+            <td class="qty">${r.qty} ${esc(r.unit)}</td>
+            <td class="qty">${kr(r.netTotal)}</td>
+          </tr>`).join("")}
+      </table>
+      <div class="total-line" style="font-weight:400"><span>Netto (ex moms)</span><span>${kr(t.net)}</span></div>
+      <div class="total-line" style="font-weight:400"><span>Moms 25 %</span><span>${kr(t.moms)}</span></div>
+      <div class="total-line"><span>Att betala (inkl moms)</span><span>${kr(t.brutto)}</span></div>
+      ${t.rot > 0 ? `<div class="total-line" style="font-weight:400;color:var(--green)"><span>− ROT-avdrag</span><span>−${kr(t.rot)}</span></div>
+        <div class="total-line"><span>Kund betalar efter ROT</span><span>${kr(t.attBetala)}</span></div>` : ""}
+    </div>
+
+    <button class="btn block" id="inv-copy">📋 Kopiera underlag</button>
+    <button class="btn block secondary" id="inv-csv" style="margin-top:8px">⬇ Ladda ner CSV (för Fortnox/Visma m.fl.)</button>
+    <p class="muted" style="margin-top:10px">Underlaget ersätter inte ditt fakturasystem — det matar in radposterna. Materialbelopp är riktprisernas mittvärde; justera mot kvitto i fakturasystemet. ROT förutsätter att kunden har avdragsutrymme kvar (max 50 000 kr/person/år) och söks via ditt fakturasystem.</p>
   `);
-  $("#of-copy").addEventListener("click", async () => {
+
+  $("#inv-upd").addEventListener("click", () => {
+    j.estHours = parseFloat($("#inv-hours").value) || 0;
+    store.save();
+    renderInvoice(jobId);
+  });
+
+  const text = invoiceText(j, rows, t);
+  $("#inv-copy").addEventListener("click", async () => {
     await navigator.clipboard.writeText(text);
     toast("Kopierat!");
   });
+  $("#inv-csv").addEventListener("click", () => downloadCSV(j, rows));
+}
+
+function invoiceText(j, rows, t) {
+  const s = state.settings;
+  const L = [];
+  if (s.foretag) L.push(s.foretag);
+  if (s.orgnr) L.push("Org.nr: " + s.orgnr);
+  if (s.foretagAdress) L.push(s.foretagAdress);
+  if (s.fskatt) L.push("Godkänd för F-skatt");
+  L.push("");
+  L.push(`FAKTURAUNDERLAG – ${j.namn}`);
+  if (j.kund) L.push(`Kund: ${j.kund}${j.adress ? ", " + j.adress : ""}`);
+  L.push("");
+  rows.forEach(r => L.push(`${r.desc} (${r.typ}) — ${r.qty} ${r.unit} — ${kr(r.netTotal)} ex moms${r.rot ? " [ROT]" : ""}`));
+  L.push("");
+  L.push(`Netto (ex moms): ${kr(t.net)}`);
+  L.push(`Moms 25 %: ${kr(t.moms)}`);
+  L.push(`Att betala inkl moms: ${kr(t.brutto)}`);
+  if (t.rot > 0) {
+    L.push(`ROT-avdrag: −${kr(t.rot)}`);
+    L.push(`Kund betalar efter ROT: ${kr(t.attBetala)}`);
+  }
+  return L.join("\n");
+}
+
+function downloadCSV(j, rows) {
+  const cell = v => `"${String(v).replace(/"/g, '""')}"`;
+  const head = ["Typ", "Beskrivning", "Antal", "Enhet", "Belopp ex moms", "Moms%", "ROT-grundande"];
+  const lines = [head.map(cell).join(";")];
+  rows.forEach(r => lines.push([
+    r.typ, r.desc, String(r.qty).replace(".", ","), r.unit,
+    r.netTotal.toFixed(2).replace(".", ","), "25", r.rot ? "Ja" : "Nej",
+  ].map(cell).join(";")));
+  const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "fakturaunderlag-" + (j.namn || "jobb").replace(/[^\wåäöÅÄÖ]+/g, "_") + ".csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast("CSV nedladdad");
 }
 
 /* ---------- Materialberäknaren ---------- */
@@ -629,6 +821,8 @@ function renderStats() {
       <div class="card"><div class="num">${kr(fakturaVarde)}</div><div class="muted">Ofakturerat arbete</div></div>
     </div>
 
+    <button class="btn block" id="st-shop" style="margin-top:14px">🛒 Inköpslista (alla aktiva jobb)</button>
+
     ${attFakturera.length ? `<h2 style="margin-top:16px">💸 Att fakturera</h2>
       ${attFakturera.map(j => `<div class="card tappable" data-job="${j.id}">
         <div class="row"><strong class="grow">${esc(j.namn)}</strong><span>${kr(totalMin(j) / 60 * state.settings.timpris)}</span></div>
@@ -638,6 +832,60 @@ function renderStats() {
       <div class="card">${problem.map(p => `<div class="note problem"><div>${esc(p.text)}</div><div class="note-meta">${esc(p.jobNamn)} · ${dateStr(p.ts)}</div></div>`).join("")}</div>` : ""}
   `;
   v.querySelectorAll("[data-job]").forEach(c => c.addEventListener("click", () => showJob(c.dataset.job)));
+  $("#st-shop").addEventListener("click", showShoppingList);
+}
+
+/* ---------- Inköpslista ---------- */
+
+function showShoppingList() {
+  // Samla material från offert- och pågående-jobb, slå ihop per namn+enhet
+  const active = state.jobs.filter(j => j.status === "offert" || j.status === "pagaende");
+  const agg = {};
+  active.forEach(j => j.material.forEach(m => m.items.forEach(i => {
+    const key = i.name + "|" + i.unit;
+    if (!agg[key]) agg[key] = { name: i.name, unit: i.unit, qty: 0, jobs: new Set() };
+    agg[key].qty += i.qty;
+    agg[key].jobs.add(j.namn);
+  })));
+  const items = Object.values(agg).sort((a, b) => a.name.localeCompare(b.name, "sv"));
+
+  modal(`
+    <div class="modal-head"><h2>🛒 Inköpslista</h2><button class="btn-icon" data-close>✕</button></div>
+    ${items.length === 0 ? `<div class="empty">Inget material på aktiva jobb ännu.</div>` : `
+    <p class="muted" style="margin-bottom:10px">Sammanslaget från ${active.length} aktiva jobb. Bocka av i butiken.</p>
+    ${items.map((it, i) => `
+      <div class="checklist-item" data-shopitem="${i}">
+        <input type="checkbox">
+        <span class="grow"><strong>${esc(it.name)}</strong> — ${Math.round(it.qty * 10) / 10} ${esc(it.unit)}
+          <div class="muted">${[...it.jobs].map(esc).join(", ")}</div></span>
+      </div>`).join("")}
+    <button class="btn block secondary" id="shop-copy" style="margin-top:12px">📋 Kopiera lista</button>`}
+  `);
+  if (items.length) {
+    document.querySelectorAll("[data-shopitem]").forEach(el => el.addEventListener("click", e => {
+      if (e.target.tagName !== "INPUT") el.querySelector("input").checked = !el.querySelector("input").checked;
+      el.classList.toggle("done", el.querySelector("input").checked);
+    }));
+    $("#shop-copy").addEventListener("click", async () => {
+      const txt = "Inköpslista\n" + items.map(it => `• ${it.name}: ${Math.round(it.qty * 10) / 10} ${it.unit}`).join("\n");
+      await navigator.clipboard.writeText(txt);
+      toast("Kopierat!");
+    });
+  }
+}
+
+function exportData() {
+  const data = { ...state };
+  delete data.activeTimer;
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "hantverkarassistenten-" + new Date().toISOString().slice(0, 10) + ".json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  state.lastExport = Date.now();
+  store.save();
+  toast("Exporterad");
 }
 
 /* ---------- Inställningar ---------- */
@@ -647,6 +895,12 @@ function showSettings() {
     <div class="modal-head"><h2>Inställningar</h2><button class="btn-icon" data-close>✕</button></div>
     <label class="field"><span>Timpris (kr/h, inkl. moms)</span><input id="s-timpris" type="number" inputmode="numeric" value="${state.settings.timpris}"></label>
     <label class="field"><span>Företagsnamn</span><input id="s-foretag" value="${esc(state.settings.foretag)}"></label>
+    <div class="field-row">
+      <label class="field"><span>Org.nr</span><input id="s-orgnr" value="${esc(state.settings.orgnr)}" placeholder="556xxx-xxxx"></label>
+      <label class="field" style="max-width:130px"><span>F-skatt</span>
+        <select id="s-fskatt"><option value="1" ${state.settings.fskatt ? "selected" : ""}>Ja</option><option value="0" ${!state.settings.fskatt ? "selected" : ""}>Nej</option></select></label>
+    </div>
+    <label class="field"><span>Företagsadress</span><input id="s-fadress" value="${esc(state.settings.foretagAdress)}" placeholder="Gata, postnr ort"></label>
     <label class="field"><span>Anthropic API-nyckel (för AI-fritextläget)</span>
       <input id="s-apikey" type="password" value="${esc(state.settings.apiKey)}" placeholder="sk-ant-...">
       <div class="muted" style="margin-top:3px">Skapa på console.anthropic.com. Sparas bara lokalt på den här enheten.</div></label>
@@ -660,22 +914,15 @@ function showSettings() {
   $("#s-save").addEventListener("click", () => {
     state.settings.timpris = parseFloat($("#s-timpris").value) || 650;
     state.settings.foretag = $("#s-foretag").value.trim();
+    state.settings.orgnr = $("#s-orgnr").value.trim();
+    state.settings.fskatt = $("#s-fskatt").value === "1";
+    state.settings.foretagAdress = $("#s-fadress").value.trim();
     state.settings.apiKey = $("#s-apikey").value.trim();
     store.save();
     closeModal();
     toast("Sparat");
   });
-  $("#s-export").addEventListener("click", () => {
-    const data = { ...state };
-    delete data.activeTimer;
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "hantverkarassistenten-" + new Date().toISOString().slice(0, 10) + ".json";
-    a.click();
-    URL.revokeObjectURL(a.href);
-    toast("Exporterad");
-  });
+  $("#s-export").addEventListener("click", exportData);
   $("#s-import").addEventListener("click", () => $("#s-file").click());
   $("#s-file").addEventListener("change", async e => {
     const file = e.target.files[0];
