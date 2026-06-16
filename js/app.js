@@ -16,10 +16,56 @@ const state = Object.assign({
   lastExport: 0,
 }, store.load());
 state.calibration = state.calibration || {};
-const DEF_SETTINGS = { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "", fakturasystem: "ingen", kundnr: "" };
+state.workers = state.workers || [];     // [{id, namn, timeCal:{avg,n}}]
+state.timeCal = state.timeCal || {};     // "kat|<kategori>" -> {avg,n} (utfall/estimat)
+state.deviations = state.deviations || []; // logg för prognosvyn
+const DEF_SETTINGS = { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "", fakturasystem: "ingen", kundnr: "", backendUrl: "", backendKey: "" };
 state.settings = Object.assign({}, DEF_SETTINGS, state.settings);
 // migrera äldre jobb till nya fält
-state.jobs.forEach(j => { j.equipment = j.equipment || []; });
+state.jobs.forEach(j => { j.equipment = j.equipment || []; j.kategori = j.kategori || ""; j.utforareId = j.utforareId || ""; });
+
+const KATEGORIER = ["Måleri", "Kakel/klinker", "Golv", "Snickeri", "El", "VVS", "Mark/bygg", "Tak", "Övrigt"];
+
+/* Uppdaterar ett löpande medelvärde av kvoten utfall/estimat. */
+function updateRatio(obj, key, ratio) {
+  const c = obj[key] || { avg: 1, n: 0 };
+  c.avg = (c.avg * c.n + ratio) / (c.n + 1);
+  c.n++;
+  obj[key] = c;
+  return c;
+}
+
+/* Historik-justerad tidsuppskattning. Kategori- och utförarfaktorn mäter båda
+   avvikelsen från råestimatet och är inte oberoende (samma jobb syns i båda) —
+   därför viktas de ihop efter antal observationer istället för att multipliceras,
+   vilket annars skulle dubbelräkna samma avvikelse. */
+function predictedHours(base, kategori, utforareId) {
+  const c = state.timeCal["kat|" + kategori];
+  const w = state.workers.find(x => x.id === utforareId)?.timeCal;
+  let num = 0, den = 0;
+  if (c && c.n >= 1) { num += c.avg * c.n; den += c.n; }
+  if (w && w.n >= 1) { num += w.avg * w.n; den += w.n; }
+  const f = den ? num / den : 1;
+  return { hours: Math.round(base * f * 10) / 10, factor: f };
+}
+
+const workerName = id => state.workers.find(w => w.id === id)?.namn || "";
+
+/* Kort sammanfattning av användarens avvikelser — matas till AI:n som kontext. */
+function aiDigest() {
+  const bits = [];
+  Object.entries(state.calibration).forEach(([k, c]) => {
+    if (c.n >= 1 && Math.abs(c.avg - 1) > 0.05)
+      bits.push(`${k.split("|")[1]}: ${c.avg > 1 ? "+" : ""}${Math.round((c.avg - 1) * 100)} %`);
+  });
+  Object.entries(state.timeCal).forEach(([k, c]) => {
+    if (c.n >= 1 && Math.abs(c.avg - 1) > 0.05)
+      bits.push(`tid ${k.split("|")[1]}: ${c.avg > 1 ? "+" : ""}${Math.round((c.avg - 1) * 100)} %`);
+  });
+  return bits.length
+    ? "Användarens historiska avvikelser (faktiskt vs beräknat) — väg in: " + bits.slice(0, 12).join("; ") + "."
+    : "";
+}
 
 /* Stabil kalibreringsnyckel: tar bort siffror, mått och parenteser ur namnet
    så "Regel 70 mm (h=2,5 m)" och "Regel 70 mm (h=2,4 m)" matchar varandra. */
@@ -119,6 +165,10 @@ function showNewJob() {
       <label class="field"><span>Status</span><select id="nj-status">${STATUS.map(s => `<option value="${s}">${STATUS_LABEL[s]}</option>`).join("")}</select></label>
     </div>
     <label class="field"><span>Adress</span><input id="nj-adress"></label>
+    <div class="field-row">
+      <label class="field"><span>Kategori</span><select id="nj-kat"><option value="">—</option>${KATEGORIER.map(k => `<option>${k}</option>`).join("")}</select></label>
+      <label class="field"><span>Utförare</span><select id="nj-utf"><option value="">—</option>${state.workers.map(w => `<option value="${w.id}">${esc(w.namn)}</option>`).join("")}</select></label>
+    </div>
     <button class="btn block" id="nj-save">Skapa jobb</button>
   `);
   $("#nj-save").addEventListener("click", () => {
@@ -127,7 +177,8 @@ function showNewJob() {
     const job = {
       id: uid(), namn, kund: $("#nj-kund").value.trim(), telefon: $("#nj-tel").value.trim(),
       adress: $("#nj-adress").value.trim(), status: $("#nj-status").value,
-      skapad: Date.now(), notes: [], material: [], time: [], checklist: [],
+      kategori: $("#nj-kat").value, utforareId: $("#nj-utf").value,
+      skapad: Date.now(), notes: [], material: [], time: [], checklist: [], equipment: [],
     };
     state.jobs.push(job);
     store.save();
@@ -137,6 +188,28 @@ function showNewJob() {
 }
 
 /* ---------- Jobbdetalj ---------- */
+
+function jobInfoCard(j) {
+  const loggat = Math.round(totalMin(j) / 60 * 10) / 10;
+  const est = j.estHours || 0;
+  const pred = est > 0 ? predictedHours(est, j.kategori, j.utforareId) : null;
+  const predDiffer = pred && Math.abs(pred.factor - 1) > 0.03;
+  const dev = j.outcomeBooked && est > 0
+    ? Math.round((loggat / est - 1) * 100) : null;
+  return `
+    <div class="card">
+      <h3 style="margin:0 0 8px">Jobbinfo & prognos</h3>
+      <div class="field-row">
+        <label class="field"><span>Kategori</span><select data-ji-kat><option value="">—</option>${KATEGORIER.map(k => `<option ${j.kategori === k ? "selected" : ""}>${k}</option>`).join("")}</select></label>
+        <label class="field"><span>Utförare</span><select data-ji-utf><option value="">—</option>${state.workers.map(w => `<option value="${w.id}" ${j.utforareId === w.id ? "selected" : ""}>${esc(w.namn)}</option>`).join("")}</select></label>
+      </div>
+      <label class="field"><span>Uppskattad arbetstid (h)</span>
+        <input id="jb-est" type="number" inputmode="decimal" step="0.5" min="0" value="${est || ""}" placeholder="0"></label>
+      ${predDiffer ? `<div class="warn" id="jb-predtip">📈 Historiskt blir ${j.kategori || "liknande jobb"}${j.utforareId ? " för " + esc(workerName(j.utforareId)) : ""} ${pred.factor > 1 ? "längre" : "kortare"} — föreslår <strong>${pred.hours} h</strong>. <button class="btn sm" id="jb-usepred" style="margin-left:6px">Använd</button></div>` : ""}
+      <div class="muted">Loggat hittills: ${loggat} h${est > 0 ? ` · uppskattat ${est} h` : ""}${dev != null ? ` · <strong style="color:${Math.abs(dev) <= 10 ? "var(--green)" : "var(--accent)"}">utfall ${dev > 0 ? "+" : ""}${dev} %</strong>` : ""}</div>
+      <button class="btn sm secondary" id="jb-book" style="margin-top:8px">${j.outcomeBooked ? "↻ Uppdatera utfall" : "✔ Bokför utfall (lär systemet)"}</button>
+    </div>`;
+}
 
 function showJob(id) {
   const j = getJob(id);
@@ -164,6 +237,8 @@ function showJob(id) {
         <button class="btn sm ${timer ? "danger" : ""}" id="jb-timer">${timer ? "⏹ Stoppa" : "▶ Starta timer"}</button>
       </div>
     </div>
+
+    ${jobInfoCard(j)}
 
     <div class="card">
       <div class="row" style="margin-bottom:6px">
@@ -243,6 +318,17 @@ function showJob(id) {
     }
     showJob(id); render();
   });
+
+  const jiKat = document.querySelector("[data-ji-kat]");
+  const jiUtf = document.querySelector("[data-ji-utf]");
+  if (jiKat) jiKat.addEventListener("change", () => { j.kategori = jiKat.value; store.save(); showJob(id); });
+  if (jiUtf) jiUtf.addEventListener("change", () => { j.utforareId = jiUtf.value; store.save(); showJob(id); });
+  if ($("#jb-est")) $("#jb-est").addEventListener("change", () => { j.estHours = parseFloat($("#jb-est").value) || 0; store.save(); showJob(id); });
+  if ($("#jb-usepred")) $("#jb-usepred").addEventListener("click", () => {
+    const p = predictedHours(j.estHours || 0, j.kategori, j.utforareId);
+    j.estHours = p.hours; store.save(); showJob(id); toast("Uppskattning justerad");
+  });
+  if ($("#jb-book")) $("#jb-book").addEventListener("click", () => bookOutcome(id));
 
   $("#jb-addnote").addEventListener("click", () => showAddNote(id));
   document.querySelectorAll("[data-delnote]").forEach(b => b.addEventListener("click", () => {
@@ -363,6 +449,46 @@ function showAddEquipment(jobId) {
     showJob(jobId);
     toast("Tillagt");
   });
+}
+
+/* ---------- Bokför utfall (tid + material → inlärning) ---------- */
+
+function bookOutcome(jobId) {
+  const j = getJob(jobId);
+  const actH = Math.round(totalMin(j) / 60 * 100) / 100;
+  const estH = j.estHours || 0;
+  if (!(estH > 0)) { toast("Ange uppskattad arbetstid först"); return; }
+  if (!(actH > 0)) { toast("Ingen tid loggad ännu"); return; }
+
+  const ratio = actH / estH;
+  if (j.kategori) updateRatio(state.timeCal, "kat|" + j.kategori, ratio);
+  if (j.utforareId) {
+    const w = state.workers.find(x => x.id === j.utforareId);
+    if (w) { w.timeCal = w.timeCal || { avg: 1, n: 0 }; updateRatioObj(w.timeCal, ratio); }
+  }
+
+  // Materialträffsäkerhet (utfall/beräknat) för de rader som har faktisk åtgång loggad
+  const matRatios = [];
+  j.material.forEach(m => m.items.forEach(i => {
+    if (i.actual > 0 && i.qty > 0) matRatios.push(i.actual / i.qty);
+  }));
+  const matAcc = matRatios.length ? matRatios.reduce((a, b) => a + b, 0) / matRatios.length : null;
+
+  state.deviations.unshift({
+    ts: Date.now(), jobNamn: j.namn, kategori: j.kategori, utforareId: j.utforareId,
+    estHours: estH, actHours: actH, timeRatio: Math.round(ratio * 100) / 100,
+    matRatio: matAcc ? Math.round(matAcc * 100) / 100 : null,
+  });
+  state.deviations = state.deviations.slice(0, 100);
+  j.outcomeBooked = true;
+  store.save();
+  toast("Utfall bokfört — systemet lär sig");
+  showJob(jobId);
+}
+
+function updateRatioObj(c, ratio) {
+  c.avg = (c.avg * c.n + ratio) / (c.n + 1);
+  c.n++;
 }
 
 /* ---------- Logga faktisk åtgång (kalibrering) ---------- */
@@ -763,7 +889,7 @@ function renderAICalc() {
     btn.disabled = true;
     btn.textContent = "Beräknar…";
     try {
-      const res = await aiMaterialSuggest(text, state.settings.apiKey);
+      const res = await aiMaterialSuggest(text, state.settings.apiKey, aiDigest());
       renderCalcResult(res, res.label, null);
     } catch (e) {
       $("#calc-result").innerHTML = `<div class="warn">⚠ ${esc(e.message)}</div>`;
@@ -897,6 +1023,7 @@ function renderStats() {
     </div>
 
     <button class="btn block" id="st-shop" style="margin-top:14px">🛒 Inköpslista (alla aktiva jobb)</button>
+    <button class="btn block secondary" id="st-pred" style="margin-top:8px">📈 Prognos & avvikelser</button>
 
     ${attFakturera.length ? `<h2 style="margin-top:16px">💸 Att fakturera</h2>
       ${attFakturera.map(j => `<div class="card tappable" data-job="${j.id}">
@@ -908,6 +1035,47 @@ function renderStats() {
   `;
   v.querySelectorAll("[data-job]").forEach(c => c.addEventListener("click", () => showJob(c.dataset.job)));
   $("#st-shop").addEventListener("click", showShoppingList);
+  $("#st-pred").addEventListener("click", showPredictions);
+}
+
+/* ---------- Prognos & avvikelser ---------- */
+
+function pct(avg) { return `${avg > 1 ? "+" : ""}${Math.round((avg - 1) * 100)} %`; }
+
+function showPredictions() {
+  const cats = Object.entries(state.timeCal).filter(([, c]) => c.n >= 1)
+    .map(([k, c]) => ({ namn: k.split("|")[1], avg: c.avg, n: c.n }))
+    .sort((a, b) => Math.abs(b.avg - 1) - Math.abs(a.avg - 1));
+  const workers = state.workers.filter(w => w.timeCal?.n >= 1)
+    .map(w => ({ namn: w.namn, avg: w.timeCal.avg, n: w.timeCal.n }));
+  const mats = Object.entries(state.calibration).filter(([, c]) => c.n >= 1 && Math.abs(c.avg - 1) > 0.03)
+    .map(([k, c]) => ({ namn: k.split("|")[1], avg: c.avg, n: c.n }))
+    .sort((a, b) => Math.abs(b.avg - 1) - Math.abs(a.avg - 1)).slice(0, 12);
+
+  const empty = !cats.length && !workers.length && !mats.length && !state.deviations.length;
+
+  modal(`
+    <div class="modal-head"><h2>📈 Prognos & avvikelser</h2><button class="btn-icon" data-close>✕</button></div>
+    ${empty ? `<div class="empty">Inget underlag ännu.<br>Sätt kategori/utförare och uppskattad tid på jobb, logga tid och material, och tryck "Bokför utfall" — så lär sig systemet.</div>` : ""}
+
+    ${cats.length ? `<h3>Tid per kategori</h3>
+      <div class="card">${cats.map(c => `<div class="time-entry"><span>${esc(c.namn)} <span class="muted">(${c.n})</span></span>
+        <span style="color:${Math.abs(c.avg - 1) <= 0.1 ? "var(--green)" : "var(--accent)"}">${c.avg > 1 ? "tar längre" : "går snabbare"}: ${pct(c.avg)}</span></div>`).join("")}</div>` : ""}
+
+    ${workers.length ? `<h3 style="margin-top:14px">Hastighet per utförare</h3>
+      <div class="card">${workers.map(w => `<div class="time-entry"><span>${esc(w.namn)} <span class="muted">(${w.n})</span></span>
+        <span style="color:${w.avg <= 1 ? "var(--green)" : "var(--accent)"}">${w.avg < 1 ? "snabbare" : "långsammare"} än uppskattat: ${pct(w.avg)}</span></div>`).join("")}</div>` : ""}
+
+    ${mats.length ? `<h3 style="margin-top:14px">Materialåtgång vs beräknat</h3>
+      <div class="card">${mats.map(m => `<div class="time-entry"><span>${esc(m.namn)} <span class="muted">(${m.n})</span></span><span>${pct(m.avg)}</span></div>`).join("")}</div>` : ""}
+
+    ${state.deviations.length ? `<h3 style="margin-top:14px">Senaste utfall</h3>
+      <div class="card">${state.deviations.slice(0, 10).map(d => `<div class="time-entry">
+        <span>${esc(d.jobNamn)}<div class="muted">${esc(d.kategori || "–")}${d.utforareId ? " · " + esc(workerName(d.utforareId)) : ""} · ${dateStr(d.ts)}</div></span>
+        <span style="text-align:right">${d.actHours} / ${d.estHours} h<br><span class="muted">${pct(d.timeRatio)}${d.matRatio ? " mtrl " + pct(d.matRatio) : ""}</span></span></div>`).join("")}</div>` : ""}
+
+    <p class="muted" style="margin-top:12px">Faktorerna justerar automatiskt framtida tidsförslag och AI-beräkningar. (n) = antal bokförda jobb.</p>
+  `);
 }
 
 /* ---------- Inköpslista ---------- */
@@ -985,7 +1153,16 @@ function showSettings() {
       <input id="s-backurl" value="${esc(state.settings.backendUrl)}" placeholder="https://din-funktion.azurewebsites.net">
       <div class="muted" style="margin-top:3px">Lämna tomt för att bara kopiera/ladda ner payloaden.</div></label>
     <label class="field"><span>App-nyckel (x-app-key)</span><input id="s-backkey" type="password" value="${esc(state.settings.backendKey)}" placeholder="delas med backenden"></label>
-    <label class="field"><span>Anthropic API-nyckel (för AI-fritextläget)</span>
+    <h3 style="margin-top:14px">Utförare</h3>
+    <div id="s-workers">${state.workers.map(w =>
+      `<div class="checklist-item"><span class="grow">👷 ${esc(w.namn)}${w.timeCal?.n >= 1 ? ` <span class="muted">(${pct(w.timeCal.avg)}, ${w.timeCal.n})</span>` : ""}</span>
+        <button class="btn-icon" style="font-size:13px" data-delworker="${w.id}">🗑</button></div>`).join("") || `<div class="muted">Inga utförare ännu.</div>`}</div>
+    <div class="row" style="gap:8px; margin:8px 0 4px">
+      <input id="s-workername" class="grow" placeholder="Namn på hantverkare">
+      <button class="btn sm" id="s-addworker">Lägg till</button>
+    </div>
+
+    <label class="field" style="margin-top:14px"><span>Anthropic API-nyckel (för AI-fritextläget)</span>
       <input id="s-apikey" type="password" value="${esc(state.settings.apiKey)}" placeholder="sk-ant-...">
       <div class="muted" style="margin-top:3px">Skapa på console.anthropic.com. Sparas bara lokalt på den här enheten.</div></label>
     <button class="btn block" id="s-save">Spara</button>
@@ -1010,6 +1187,19 @@ function showSettings() {
     closeModal();
     toast("Sparat");
   });
+  $("#s-addworker").addEventListener("click", () => {
+    const namn = $("#s-workername").value.trim();
+    if (!namn) { toast("Ange ett namn"); return; }
+    state.workers.push({ id: uid(), namn, timeCal: { avg: 1, n: 0 } });
+    store.save();
+    showSettings();
+  });
+  document.querySelectorAll("[data-delworker]").forEach(b => b.addEventListener("click", () => {
+    state.workers = state.workers.filter(w => w.id !== b.dataset.delworker);
+    store.save();
+    showSettings();
+  }));
+
   $("#s-export").addEventListener("click", exportData);
   $("#s-import").addEventListener("click", () => $("#s-file").click());
   $("#s-file").addEventListener("change", async e => {
@@ -1020,7 +1210,11 @@ function showSettings() {
       if (!Array.isArray(data.jobs)) throw new Error("fel format");
       if (!confirm(`Importera ${data.jobs.length} jobb? Ersätter all nuvarande data.`)) return;
       state.jobs = data.jobs;
+      state.jobs.forEach(j => { j.equipment = j.equipment || []; j.kategori = j.kategori || ""; j.utforareId = j.utforareId || ""; });
       state.calibration = data.calibration || {};
+      state.workers = data.workers || [];
+      state.timeCal = data.timeCal || {};
+      state.deviations = data.deviations || [];
       state.settings = Object.assign(state.settings, data.settings || {});
       state.activeTimer = null;
       store.save();

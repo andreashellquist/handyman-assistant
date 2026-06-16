@@ -49,7 +49,8 @@ Regler:
 - Om viktiga mått eller förutsättningar saknas: gör ett rimligt antagande, skriv antagandet i pkg/warnings, och lista frågan i questions.
 - Svara alltid på svenska.`;
 
-async function aiMaterialSuggest(text, apiKey) {
+async function aiMaterialSuggest(text, apiKey, context) {
+  const userContent = context ? text + "\n\n" + context : text;
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -63,7 +64,7 @@ async function aiMaterialSuggest(text, apiKey) {
       max_tokens: 4096,
       system: AI_SYSTEM,
       output_config: { format: { type: "json_schema", schema: AI_SCHEMA } },
-      messages: [{ role: "user", content: text }],
+      messages: [{ role: "user", content: userContent }],
     }),
   });
 
