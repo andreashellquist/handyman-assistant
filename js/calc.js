@@ -287,21 +287,33 @@ function pkgSack(kg, sackSize) {
 /* calibration: { "<jobKey>|<itemName>": { avg, n } } — genomsnittlig kvot
    faktisk/beräknad åtgång per material, från loggade jobb. Justerar förslaget
    när avvikelsen är etablerad (minst 1 loggning, mer än ±3 %). */
-function runCalc(jobKey, values, calibration) {
+/* Shrinkage-blandning: lokal data + global prior. Den globala potten väger som
+   mest GLOBAL_PRIOR_K "observationer", så egen data tar över i takt med att den
+   växer. Båda är {avg,n} eller null. */
+const GLOBAL_PRIOR_K = 4;
+function blendCal(local, global) {
+  let num = 0, den = 0;
+  if (local && local.n >= 1) { num += local.avg * local.n; den += local.n; }
+  if (global && global.n >= 1) { const k = Math.min(global.n, GLOBAL_PRIOR_K); num += global.avg * k; den += k; }
+  return den ? { avg: num / den, n: den } : null;
+}
+
+function runCalc(jobKey, values, calibration, globalMat) {
   const job = CALC_JOBS[jobKey];
   const res = job.compute(values);
-  if (calibration) {
-    res.items.forEach(i => {
-      const cal = calibration[jobKey + "|" + (typeof normItem === "function" ? normItem(i.name) : i.name)];
-      if (cal && cal.n >= 1 && Math.abs(cal.avg - 1) > 0.03) {
-        const factor = Math.min(2, Math.max(0.5, cal.avg));
-        i.qty = Math.ceil(i.qty * factor * 10) / 10;
-        if (i.priceLow) i.priceLow *= factor;
-        if (i.priceHigh) i.priceHigh *= factor;
-        i.calibrated = Math.round((factor - 1) * 100);
-      }
-    });
-  }
+  const norm = n => (typeof normItem === "function" ? normItem(n) : n);
+  res.items.forEach(i => {
+    const local = calibration?.[jobKey + "|" + norm(i.name)];
+    const global = globalMat?.[norm(i.name)];
+    const cal = blendCal(local, global);
+    if (cal && Math.abs(cal.avg - 1) > 0.03) {
+      const factor = Math.min(2, Math.max(0.5, cal.avg));
+      i.qty = Math.ceil(i.qty * factor * 10) / 10;
+      if (i.priceLow) i.priceLow *= factor;
+      if (i.priceHigh) i.priceHigh *= factor;
+      i.calibrated = Math.round((factor - 1) * 100);
+    }
+  });
   let low = 0, high = 0;
   res.items.forEach(i => { low += i.priceLow || 0; high += i.priceHigh || 0; });
   res.totalLow = Math.round(low / 10) * 10;

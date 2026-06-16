@@ -11,6 +11,12 @@ Frontenden bygger den fältmappade payloaden; den här funktionen håller hemlig
 | `GET` | `/api/auth/{system}/start` | Startar OAuth-inloggning (redirect till Fortnox/Visma) |
 | `GET` | `/api/auth/{system}/callback` | Tar emot koden, växlar mot tokens, lagrar dem |
 | `POST` | `/api/invoice/{system}` | Tar payloaden och POST:ar till systemets faktura-API |
+| `POST` | `/api/calibration` | Tar emot anonyma avvikelsekvoter till den globala potten |
+| `GET` | `/api/calibration` | Returnerar den aggregerade globala kalibreringsmodellen |
+
+### Global kalibreringspott
+
+`/api/calibration` är en delad, anonym pott av avvikelsekvoter (faktiskt/beräknat) per kategori (tid) och materialnamn. Appen bidrar vid varje bokfört utfall och materiallogg, och hämtar den aggregerade modellen som *prior*. Lokalt blandar appen din egen historik med potten via shrinkage — egen data tar över i takt med att den växer. Endast kvoter lagras: **aldrig kundnamn, priser eller jobbtext**. Kräver `TABLES_CONNECTION` (annars svarar endpointen tomt/503). Skyddas av `x-app-key`.
 
 `{system}` = `fortnox` eller `visma`. `POST /invoice` skyddas av headern `x-app-key` (delad nyckel `APP_API_KEY`).
 

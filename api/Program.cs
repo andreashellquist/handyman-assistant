@@ -17,6 +17,7 @@ var host = new HostBuilder()
             services.AddSingleton<ITokenStore, InMemoryTokenStore>();
 
         services.AddSingleton<OAuthService>();
+        services.AddSingleton(new CalibrationStore(conn));
     })
     .Build();
 

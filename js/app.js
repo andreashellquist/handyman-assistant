@@ -19,7 +19,8 @@ state.calibration = state.calibration || {};
 state.workers = state.workers || [];     // [{id, namn, timeCal:{avg,n}}]
 state.timeCal = state.timeCal || {};     // "kat|<kategori>" -> {avg,n} (utfall/estimat)
 state.deviations = state.deviations || []; // logg för prognosvyn
-const DEF_SETTINGS = { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "", fakturasystem: "ingen", kundnr: "", backendUrl: "", backendKey: "" };
+state.sharedModel = state.sharedModel || { time: {}, material: {}, fetchedAt: 0 }; // global kalibreringspott (cache)
+const DEF_SETTINGS = { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "", fakturasystem: "ingen", kundnr: "", backendUrl: "", backendKey: "", shareCalibration: true };
 state.settings = Object.assign({}, DEF_SETTINGS, state.settings);
 // migrera äldre jobb till nya fält
 state.jobs.forEach(j => { j.equipment = j.equipment || []; j.kategori = j.kategori || ""; j.utforareId = j.utforareId || ""; });
@@ -40,10 +41,12 @@ function updateRatio(obj, key, ratio) {
    därför viktas de ihop efter antal observationer istället för att multipliceras,
    vilket annars skulle dubbelräkna samma avvikelse. */
 function predictedHours(base, kategori, utforareId) {
-  const c = state.timeCal["kat|" + kategori];
+  // Kategori: lokal + global prior (shrinkage). Utförare: bara lokalt (en
+  // specifik person går inte att poola globalt).
+  const catB = blendCal(state.timeCal["kat|" + kategori], state.sharedModel.time?.[normItem(kategori || "")]);
   const w = state.workers.find(x => x.id === utforareId)?.timeCal;
   let num = 0, den = 0;
-  if (c && c.n >= 1) { num += c.avg * c.n; den += c.n; }
+  if (catB) { num += catB.avg * catB.n; den += catB.n; }
   if (w && w.n >= 1) { num += w.avg * w.n; den += w.n; }
   const f = den ? num / den : 1;
   return { hours: Math.round(base * f * 10) / 10, factor: f };
@@ -65,6 +68,37 @@ function aiDigest() {
   return bits.length
     ? "Användarens historiska avvikelser (faktiskt vs beräknat) — väg in: " + bits.slice(0, 12).join("; ") + "."
     : "";
+}
+
+/* ---------- Global kalibreringspott (synk mot backend) ---------- */
+
+function canShare() {
+  return !!state.settings.backendUrl && !!state.settings.backendKey && state.settings.shareCalibration;
+}
+
+/* Skickar anonyma avvikelsekvoter till den globala potten (fire-and-forget). */
+function contributeSamples(samples) {
+  if (!canShare() || !samples.length) return;
+  fetch(`${state.settings.backendUrl}/api/calibration`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-app-key": state.settings.backendKey },
+    body: JSON.stringify({ samples }),
+  }).catch(() => { /* tyst — bidrag är best effort */ });
+}
+
+/* Hämtar den aggregerade globala modellen och cachar den lokalt. */
+async function syncCalibrationModel(force) {
+  if (!state.settings.backendUrl || !state.settings.backendKey) return;
+  if (!force && Date.now() - (state.sharedModel.fetchedAt || 0) < 6 * 36e5) return; // max var 6:e timme
+  try {
+    const resp = await fetch(`${state.settings.backendUrl}/api/calibration`, {
+      headers: { "x-app-key": state.settings.backendKey },
+    });
+    if (!resp.ok) return;
+    const model = await resp.json();
+    state.sharedModel = { time: model.time || {}, material: model.material || {}, fetchedAt: Date.now() };
+    store.save();
+  } catch { /* tyst */ }
 }
 
 /* Stabil kalibreringsnyckel: tar bort siffror, mått och parenteser ur namnet
@@ -461,7 +495,10 @@ function bookOutcome(jobId) {
   if (!(actH > 0)) { toast("Ingen tid loggad ännu"); return; }
 
   const ratio = actH / estH;
-  if (j.kategori) updateRatio(state.timeCal, "kat|" + j.kategori, ratio);
+  if (j.kategori) {
+    updateRatio(state.timeCal, "kat|" + j.kategori, ratio);
+    contributeSamples([{ kind: "time", key: normItem(j.kategori), ratio }]);
+  }
   if (j.utforareId) {
     const w = state.workers.find(x => x.id === j.utforareId);
     if (w) { w.timeCal = w.timeCal || { avg: 1, n: 0 }; updateRatioObj(w.timeCal, ratio); }
@@ -506,21 +543,20 @@ function showLogActual(jobId, matIndex) {
     <button class="btn block" id="la-save">Spara</button>
   `);
   $("#la-save").addEventListener("click", () => {
+    const samples = [];
     document.querySelectorAll("[data-actual]").forEach(el => {
       const actual = parseFloat(el.value);
       if (!(actual > 0)) return;
       const item = m.items[+el.dataset.actual];
       item.actual = actual;
-      if (m.calcKey && item.qty > 0) {
-        const key = m.calcKey + "|" + normItem(item.name);
-        const cal = state.calibration[key] || { avg: 1, n: 0 };
+      if (item.qty > 0) {
         const ratio = actual / item.qty;
-        cal.avg = (cal.avg * cal.n + ratio) / (cal.n + 1);
-        cal.n++;
-        state.calibration[key] = cal;
+        if (m.calcKey) updateRatio(state.calibration, m.calcKey + "|" + normItem(item.name), ratio);
+        samples.push({ kind: "material", key: normItem(item.name), ratio });
       }
     });
     store.save();
+    contributeSamples(samples);
     toast("Åtgång loggad");
     showJob(jobId);
   });
@@ -811,7 +847,7 @@ function renderCalc() {
     });
     if (missing) { toast("Fyll i måtten först"); return; }
 
-    const res = runCalc(calcSelected, values, state.calibration);
+    const res = runCalc(calcSelected, values, state.calibration, state.sharedModel.material);
     renderCalcResult(res, job.label, calcSelected);
   });
 }
@@ -1074,8 +1110,17 @@ function showPredictions() {
         <span>${esc(d.jobNamn)}<div class="muted">${esc(d.kategori || "–")}${d.utforareId ? " · " + esc(workerName(d.utforareId)) : ""} · ${dateStr(d.ts)}</div></span>
         <span style="text-align:right">${d.actHours} / ${d.estHours} h<br><span class="muted">${pct(d.timeRatio)}${d.matRatio ? " mtrl " + pct(d.matRatio) : ""}</span></span></div>`).join("")}</div>` : ""}
 
+    ${canShare() ? `<div class="muted" style="margin-top:12px">🌐 Global pott: ${Object.keys(state.sharedModel.time || {}).length} kategorier, ${Object.keys(state.sharedModel.material || {}).length} material${state.sharedModel.fetchedAt ? " · synkad " + dateStr(state.sharedModel.fetchedAt) : ""}. Dina förslag blandar din egen historik med allas anonyma data.</div>` : ""}
     <p class="muted" style="margin-top:12px">Faktorerna justerar automatiskt framtida tidsförslag och AI-beräkningar. (n) = antal bokförda jobb.</p>
   `);
+  if (state.settings.backendUrl && !showPredictions._synced) {
+    showPredictions._synced = true;
+    syncCalibrationModel(true).then(() => {
+      if (document.querySelector(".modal h2")?.textContent.includes("Prognos")) showPredictions();
+    });
+  } else {
+    showPredictions._synced = false;
+  }
 }
 
 /* ---------- Inköpslista ---------- */
@@ -1153,6 +1198,9 @@ function showSettings() {
       <input id="s-backurl" value="${esc(state.settings.backendUrl)}" placeholder="https://din-funktion.azurewebsites.net">
       <div class="muted" style="margin-top:3px">Lämna tomt för att bara kopiera/ladda ner payloaden.</div></label>
     <label class="field"><span>App-nyckel (x-app-key)</span><input id="s-backkey" type="password" value="${esc(state.settings.backendKey)}" placeholder="delas med backenden"></label>
+    <label class="field"><span>Dela anonym kalibrering</span>
+      <select id="s-share"><option value="1" ${state.settings.shareCalibration ? "selected" : ""}>Ja — bidra till & använd den globala potten</option><option value="0" ${!state.settings.shareCalibration ? "selected" : ""}>Nej — bara min egen data</option></select>
+      <div class="muted" style="margin-top:3px">Endast anonyma avvikelsekvoter delas (aldrig kunder, priser eller text). Du får bättre prognoser från allas data.</div></label>
     <h3 style="margin-top:14px">Utförare</h3>
     <div id="s-workers">${state.workers.map(w =>
       `<div class="checklist-item"><span class="grow">👷 ${esc(w.namn)}${w.timeCal?.n >= 1 ? ` <span class="muted">(${pct(w.timeCal.avg)}, ${w.timeCal.n})</span>` : ""}</span>
@@ -1182,10 +1230,12 @@ function showSettings() {
     state.settings.kundnr = $("#s-kundnr").value.trim();
     state.settings.backendUrl = $("#s-backurl").value.trim().replace(/\/$/, "");
     state.settings.backendKey = $("#s-backkey").value.trim();
+    state.settings.shareCalibration = $("#s-share").value === "1";
     state.settings.apiKey = $("#s-apikey").value.trim();
     store.save();
     closeModal();
     toast("Sparat");
+    syncCalibrationModel(true);
   });
   $("#s-addworker").addEventListener("click", () => {
     const namn = $("#s-workername").value.trim();
@@ -1215,6 +1265,7 @@ function showSettings() {
       state.workers = data.workers || [];
       state.timeCal = data.timeCal || {};
       state.deviations = data.deviations || [];
+      state.sharedModel = data.sharedModel || { time: {}, material: {}, fetchedAt: 0 };
       state.settings = Object.assign(state.settings, data.settings || {});
       state.activeTimer = null;
       store.save();
@@ -1237,3 +1288,4 @@ function modal(html) {
 function closeModal() { $("#modal-root").innerHTML = ""; }
 
 render();
+syncCalibrationModel(false);
