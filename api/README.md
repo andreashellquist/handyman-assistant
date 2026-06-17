@@ -78,6 +78,17 @@ az functionapp config appsettings set -n handyman-fn-<unikt> -g handyman-rg --se
 
 Workflowen hoppar över sig själv om `AZURE_FUNCTIONAPP_NAME` saknas (så forkar utan Azure inte rödflaggas). App Settings (secrets/URL:er) sätts separat enligt ovan — de rörs inte av deployen.
 
+## Smoke-test
+
+Verifiera en deployad (eller lokal) backend utan att röra riktiga fakturor:
+
+```bash
+./smoke-test.sh https://handyman-fn-<unikt>.azurewebsites.net "<APP_API_KEY>"
+# eller lokalt:  ./smoke-test.sh http://localhost:7071 dev-key
+```
+
+Testar att kalibreringspotten kräver app-nyckel, tar emot ett bidrag (`POST`), returnerar det i modellen (`GET`), och att OAuth-start svarar. Avslutar med exitkod 0 om allt går igenom.
+
 ## 4. Koppla appen
 
 I appen → ⚙ Inställningar:
