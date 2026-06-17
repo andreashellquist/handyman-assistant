@@ -53,7 +53,19 @@ else
   printf '  ❌ Modellen saknar bidraget (har TABLES_CONNECTION satts?)\n'; fail=$((fail+1))
 fi
 
-# 4. OAuth-start: redirect (302) för fortnox om konfigurerat, annars 400
+# 4. Städa bort testmarkören igen
+echo "Kalibrering – städning"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE_URL/api/calibration/time/$marker" \
+  -H "x-app-key: $APP_KEY")
+check "DELETE testdata accepteras" "204" "$code"
+body=$(curl -s -H "x-app-key: $APP_KEY" "$BASE_URL/api/calibration")
+if echo "$body" | grep -q "$marker"; then
+  printf '  ❌ Testmarkören finns kvar efter DELETE\n'; fail=$((fail+1))
+else
+  printf '  ✅ Testdata borttagen\n'; pass=$((pass+1))
+fi
+
+# 5. OAuth-start: redirect (302) för fortnox om konfigurerat, annars 400
 echo "OAuth-start"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/auth/fortnox/start")
 if [[ "$code" == "302" ]]; then printf '  ✅ Fortnox auth/start redirectar (302)\n'; pass=$((pass+1));

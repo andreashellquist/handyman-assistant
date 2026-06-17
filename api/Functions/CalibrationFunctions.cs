@@ -47,6 +47,17 @@ public class CalibrationFunctions
         return resp;
     }
 
+    [Function("CalibrationDelete")]
+    public async Task<HttpResponseData> Delete(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "calibration/{kind}/{key}")] HttpRequestData req,
+        string kind, string key)
+    {
+        if (!AppKeyOk(req)) return Status(req, HttpStatusCode.Unauthorized);
+        if (!_store.Enabled) return Status(req, HttpStatusCode.ServiceUnavailable);
+        await _store.DeleteAsync(kind, key);
+        return Status(req, HttpStatusCode.NoContent);
+    }
+
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     private static bool AppKeyOk(HttpRequestData req)

@@ -13,6 +13,7 @@ Frontenden bygger den fältmappade payloaden; den här funktionen håller hemlig
 | `POST` | `/api/invoice/{system}` | Tar payloaden och POST:ar till systemets faktura-API |
 | `POST` | `/api/calibration` | Tar emot anonyma avvikelsekvoter till den globala potten |
 | `GET` | `/api/calibration` | Returnerar den aggregerade globala kalibreringsmodellen |
+| `DELETE` | `/api/calibration/{kind}/{key}` | Tar bort en aggregatpost (t.ex. testdata) |
 
 ### Global kalibreringspott
 
@@ -87,7 +88,7 @@ Verifiera en deployad (eller lokal) backend utan att röra riktiga fakturor:
 # eller lokalt:  ./smoke-test.sh http://localhost:7071 dev-key
 ```
 
-Testar att kalibreringspotten kräver app-nyckel, tar emot ett bidrag (`POST`), returnerar det i modellen (`GET`), och att OAuth-start svarar. Avslutar med exitkod 0 om allt går igenom.
+Testar att kalibreringspotten kräver app-nyckel, tar emot ett bidrag (`POST`), returnerar det i modellen (`GET`), **städar bort testdatan igen (`DELETE`)**, och att OAuth-start svarar. Avslutar med exitkod 0 om allt går igenom — inga spår lämnas i potten.
 
 ## 4. Koppla appen
 

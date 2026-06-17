@@ -60,6 +60,24 @@ public class CalibrationStore
         }
     }
 
+    /// <summary>Tar bort en aggregatpost (t.ex. testdata). Returnerar true om den fanns.</summary>
+    public async Task<bool> DeleteAsync(string kind, string key)
+    {
+        if (_table is null) return false;
+        if (kind != "time" && kind != "material") return false;
+        key = Sanitize(key);
+        if (key.Length == 0) return false;
+        try
+        {
+            await _table.DeleteEntityAsync(kind, key);
+            return true;
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return false;
+        }
+    }
+
     /// <summary>Returnerar { time: { key: {avg,n} }, material: { key: {avg,n} } }.</summary>
     public async Task<Dictionary<string, Dictionary<string, object>>> GetModelAsync()
     {
