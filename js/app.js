@@ -20,8 +20,17 @@ state.workers = state.workers || [];     // [{id, namn, timeCal:{avg,n}}]
 state.timeCal = state.timeCal || {};     // "kat|<kategori>" -> {avg,n} (utfall/estimat)
 state.deviations = state.deviations || []; // logg för prognosvyn
 state.sharedModel = state.sharedModel || { time: {}, material: {}, fetchedAt: 0 }; // global kalibreringspott (cache)
-const DEF_SETTINGS = { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "", fakturasystem: "ingen", kundnr: "", backendUrl: "", backendKey: "", shareCalibration: true };
+const DEF_SETTINGS = { timpris: 650, foretag: "", apiKey: "", orgnr: "", fskatt: true, foretagAdress: "", fakturasystem: "ingen", kundnr: "", backendUrl: "", backendKey: "", shareCalibration: true, mode: "pro", modeChosen: false };
 state.settings = Object.assign({}, DEF_SETTINGS, state.settings);
+
+/* Läge: proffs (firma, fakturering) eller privat (gör-det-själv-projekt). */
+const isPro = () => state.settings.mode !== "privat";
+const seg = () => isPro() ? "pro" : "diy";
+const T = () => isPro()
+  ? { jobs: "Jobb", job: "jobb", kund: "Kund", kundPh: "Namn", nytt: "Nytt jobb", namnPh: "t.ex. Badrum Svensson", budget: "Faktura-/offertunderlag" }
+  : { jobs: "Projekt", job: "projekt", kund: "Plats/rum", kundPh: "t.ex. Badrummet", nytt: "Nytt projekt", namnPh: "t.ex. Måla sovrummet", budget: "Budget" };
+const STATUS_LABEL_PRIVAT = { offert: "Planerat", pagaende: "Pågående", klart: "Klart", fakturerat: "Avslutat" };
+const statusLabel = s => isPro() ? STATUS_LABEL[s] : STATUS_LABEL_PRIVAT[s];
 // migrera äldre jobb till nya fält
 state.jobs.forEach(j => { j.equipment = j.equipment || []; j.kategori = j.kategori || ""; j.utforareId = j.utforareId || ""; });
 
@@ -79,10 +88,11 @@ function canShare() {
 /* Skickar anonyma avvikelsekvoter till den globala potten (fire-and-forget). */
 function contributeSamples(samples) {
   if (!canShare() || !samples.length) return;
+  const tagged = samples.map(s => ({ ...s, seg: seg() }));
   fetch(`${state.settings.backendUrl}/api/calibration`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-app-key": state.settings.backendKey },
-    body: JSON.stringify({ samples }),
+    body: JSON.stringify({ samples: tagged }),
   }).catch(() => { /* tyst — bidrag är best effort */ });
 }
 
@@ -91,7 +101,7 @@ async function syncCalibrationModel(force) {
   if (!state.settings.backendUrl || !state.settings.backendKey) return;
   if (!force && Date.now() - (state.sharedModel.fetchedAt || 0) < 6 * 36e5) return; // max var 6:e timme
   try {
-    const resp = await fetch(`${state.settings.backendUrl}/api/calibration`, {
+    const resp = await fetch(`${state.settings.backendUrl}/api/calibration?seg=${seg()}`, {
       headers: { "x-app-key": state.settings.backendKey },
     });
     if (!resp.ok) return;
@@ -142,7 +152,14 @@ document.querySelectorAll("[data-nav]").forEach(b =>
 $("#btn-settings").addEventListener("click", showSettings);
 
 function render() {
-  const titles = { jobs: "Jobb", calc: "Materialberäknare", time: "Tid", stats: "Översikt" };
+  // Anpassa nav till läge: byt etikett på Jobb→Projekt, göm Tid i privatläge.
+  const jobBtn = document.querySelector('[data-nav="jobs"]');
+  if (jobBtn) jobBtn.querySelector(".ico").nextSibling.textContent = T().jobs;
+  const timeBtn = document.querySelector('[data-nav="time"]');
+  if (timeBtn) timeBtn.style.display = isPro() ? "" : "none";
+  if (!isPro() && nav === "time") nav = "jobs";
+
+  const titles = { jobs: T().jobs, calc: "Materialberäknare", time: "Tid", stats: "Översikt" };
   $("#topbar-title").textContent = titles[nav];
   ({ jobs: renderJobs, calc: renderCalc, time: renderTime, stats: renderStats }[nav])();
 }
@@ -160,9 +177,9 @@ function renderJobs() {
     ${needsBackup ? `<div class="warn" id="backup-nudge" style="cursor:pointer">💾 Dags att säkerhetskopiera — data ligger bara lokalt. Tryck för att exportera.</div>` : ""}
     <div class="seg">
       ${["alla", ...STATUS].map(s =>
-        `<button data-f="${s}" class="${jobFilter === s ? "active" : ""}">${s === "alla" ? "Alla" : STATUS_LABEL[s]}</button>`).join("")}
+        `<button data-f="${s}" class="${jobFilter === s ? "active" : ""}">${s === "alla" ? "Alla" : statusLabel(s)}</button>`).join("")}
     </div>
-    ${jobs.length === 0 ? `<div class="empty"><div class="big">🔨</div>Inga jobb här ännu.<br>Tryck på + för att lägga till ditt första.</div>` : ""}
+    ${jobs.length === 0 ? `<div class="empty"><div class="big">${isPro() ? "🔨" : "🏠"}</div>Inga ${T().jobs.toLowerCase()} här ännu.<br>Tryck på + för att lägga till ditt första.</div>` : ""}
     <div id="job-list">
       ${jobs.map(j => {
         const timer = state.activeTimer?.jobId === j.id;
@@ -173,7 +190,7 @@ function renderJobs() {
               <strong>${esc(j.namn)}</strong>
               <div class="muted">${esc(j.kund || "")}${j.adress ? " · " + esc(j.adress) : ""}</div>
             </div>
-            <span class="badge ${j.status}">${STATUS_LABEL[j.status]}</span>
+            <span class="badge ${j.status}">${statusLabel(j.status)}</span>
           </div>
           <div class="muted" style="margin-top:6px">
             ${timer ? "⏱ Timer igång · " : ""}${j.time.reduce((s, t) => s + t.min, 0) > 0 ? fmtMin(totalMin(j)) + " · " : ""}${j.material.length ? j.material.length + " materiallistor · " : ""}${problems ? "⚠ " + problems + " problem · " : ""}${dateStr(j.skapad)}
@@ -191,27 +208,27 @@ function renderJobs() {
 
 function showNewJob() {
   modal(`
-    <div class="modal-head"><h2>Nytt jobb</h2><button class="btn-icon" data-close>✕</button></div>
-    <label class="field"><span>Jobbnamn *</span><input id="nj-namn" placeholder="t.ex. Badrum Svensson" autofocus></label>
-    <label class="field"><span>Kund</span><input id="nj-kund" placeholder="Namn"></label>
+    <div class="modal-head"><h2>${T().nytt}</h2><button class="btn-icon" data-close>✕</button></div>
+    <label class="field"><span>${isPro() ? "Jobbnamn" : "Projektnamn"} *</span><input id="nj-namn" placeholder="${T().namnPh}" autofocus></label>
+    <label class="field"><span>${T().kund}</span><input id="nj-kund" placeholder="${T().kundPh}"></label>
     <div class="field-row">
-      <label class="field"><span>Telefon</span><input id="nj-tel" type="tel"></label>
-      <label class="field"><span>Status</span><select id="nj-status">${STATUS.map(s => `<option value="${s}">${STATUS_LABEL[s]}</option>`).join("")}</select></label>
+      ${isPro() ? `<label class="field"><span>Telefon</span><input id="nj-tel" type="tel"></label>` : ""}
+      <label class="field"><span>Status</span><select id="nj-status">${STATUS.map(s => `<option value="${s}">${statusLabel(s)}</option>`).join("")}</select></label>
     </div>
     <label class="field"><span>Adress</span><input id="nj-adress"></label>
     <div class="field-row">
       <label class="field"><span>Kategori</span><select id="nj-kat"><option value="">—</option>${KATEGORIER.map(k => `<option>${k}</option>`).join("")}</select></label>
-      <label class="field"><span>Utförare</span><select id="nj-utf"><option value="">—</option>${state.workers.map(w => `<option value="${w.id}">${esc(w.namn)}</option>`).join("")}</select></label>
+      ${isPro() ? `<label class="field"><span>Utförare</span><select id="nj-utf"><option value="">—</option>${state.workers.map(w => `<option value="${w.id}">${esc(w.namn)}</option>`).join("")}</select></label>` : ""}
     </div>
-    <button class="btn block" id="nj-save">Skapa jobb</button>
+    <button class="btn block" id="nj-save">${isPro() ? "Skapa jobb" : "Skapa projekt"}</button>
   `);
   $("#nj-save").addEventListener("click", () => {
     const namn = $("#nj-namn").value.trim();
-    if (!namn) { toast("Ange ett jobbnamn"); return; }
+    if (!namn) { toast("Ange ett namn"); return; }
     const job = {
-      id: uid(), namn, kund: $("#nj-kund").value.trim(), telefon: $("#nj-tel").value.trim(),
+      id: uid(), namn, kund: $("#nj-kund").value.trim(), telefon: $("#nj-tel")?.value.trim() || "",
       adress: $("#nj-adress").value.trim(), status: $("#nj-status").value,
-      kategori: $("#nj-kat").value, utforareId: $("#nj-utf").value,
+      kategori: $("#nj-kat").value, utforareId: $("#nj-utf")?.value || "",
       skapad: Date.now(), notes: [], material: [], time: [], checklist: [], equipment: [],
     };
     state.jobs.push(job);
@@ -256,7 +273,7 @@ function showJob(id) {
       <button class="btn-icon" data-close>✕</button>
     </div>
     <div class="row" style="margin-bottom:12px; flex-wrap:wrap">
-      ${STATUS.map(s => `<button class="btn sm ${j.status === s ? "" : "secondary"}" data-status="${s}">${STATUS_LABEL[s]}</button>`).join("")}
+      ${STATUS.map(s => `<button class="btn sm ${j.status === s ? "" : "secondary"}" data-status="${s}">${statusLabel(s)}</button>`).join("")}
     </div>
     ${j.kund || j.adress || j.telefon ? `<div class="card small">
       ${j.kund ? `<div><strong>${esc(j.kund)}</strong></div>` : ""}
@@ -264,7 +281,7 @@ function showJob(id) {
       ${j.adress ? `<div><a href="https://maps.apple.com/?q=${encodeURIComponent(j.adress)}" target="_blank">${esc(j.adress)} 📍</a></div>` : ""}
     </div>` : ""}
 
-    <div class="card">
+    ${isPro() ? `<div class="card">
       <div class="row">
         <div class="grow"><h3 style="margin:0">Tid: ${fmtMin(totalMin(j))}</h3>
           <div class="muted">à ${state.settings.timpris} kr/h = ${kr(totalMin(j) / 60 * state.settings.timpris)}</div></div>
@@ -272,7 +289,7 @@ function showJob(id) {
       </div>
     </div>
 
-    ${jobInfoCard(j)}
+    ${jobInfoCard(j)}` : ""}
 
     <div class="card">
       <div class="row" style="margin-bottom:6px">
@@ -334,15 +351,15 @@ function showJob(id) {
         </div>`).join("")}
     </div>
 
-    <button class="btn block" id="jb-offert" style="margin-bottom:8px">📄 Faktura-/offertunderlag</button>
-    <button class="btn block danger" id="jb-del">Ta bort jobb</button>
+    <button class="btn block" id="jb-offert" style="margin-bottom:8px">${isPro() ? "📄 Faktura-/offertunderlag" : "💰 Budget"}</button>
+    <button class="btn block danger" id="jb-del">${isPro() ? "Ta bort jobb" : "Ta bort projekt"}</button>
   `);
 
   document.querySelectorAll("[data-status]").forEach(b => b.addEventListener("click", () => {
     j.status = b.dataset.status; store.save(); showJob(id); render();
   }));
 
-  $("#jb-timer").addEventListener("click", () => {
+  if ($("#jb-timer")) $("#jb-timer").addEventListener("click", () => {
     if (state.activeTimer?.jobId === id) stopTimer();
     else {
       if (state.activeTimer) stopTimer();
@@ -397,7 +414,7 @@ function showJob(id) {
     j.equipment.splice(+b.dataset.deleq, 1); store.save(); showJob(id);
   }));
 
-  $("#jb-offert").addEventListener("click", () => showOffert(id));
+  $("#jb-offert").addEventListener("click", () => isPro() ? showOffert(id) : showBudget(id));
   $("#jb-del").addEventListener("click", () => {
     if (!confirm(`Ta bort "${j.namn}" och allt som hör till?`)) return;
     state.jobs = state.jobs.filter(x => x.id !== id);
@@ -604,6 +621,57 @@ function invoiceTotals(rows) {
   const labourInkl = labourNet * (1 + MOMS);
   const rot = Math.min(labourInkl * 0.5, 50000); // 50 % av arbete inkl. moms, tak 50 000 kr/person/år
   return { net, moms: net * MOMS, brutto: net * (1 + MOMS), rot, attBetala: net * (1 + MOMS) - rot };
+}
+
+/* ---------- Budget (privatläge) ---------- */
+
+function showBudget(jobId) {
+  const j = getJob(jobId);
+  let matLow = 0, matHigh = 0;
+  j.material.forEach(m => { matLow += m.totalLow; matHigh += m.totalHigh; });
+  const eqCost = j.equipment.reduce((s, e) => s + (e.cost || 0), 0);
+  const planLow = matLow + eqCost, planHigh = matHigh + eqCost;
+  const planMid = Math.round((planLow + planHigh) / 2);
+  if (j.budget == null) j.budget = planMid;
+
+  modal(`
+    <div class="modal-head"><h2>💰 Budget</h2><button class="btn-icon" data-close>✕</button></div>
+    <div class="card">
+      <div class="total-line" style="font-weight:400"><span>Material (uppskattat)</span><span>${kr(matLow)}–${kr(matHigh)}</span></div>
+      ${eqCost > 0 ? `<div class="total-line" style="font-weight:400"><span>Maskiner/verktyg</span><span>${kr(eqCost)}</span></div>` : ""}
+      <div class="total-line"><span>Beräknad kostnad</span><span>${kr(planLow)}–${kr(planHigh)}</span></div>
+    </div>
+    <label class="field"><span>Min budget (kr)</span><input id="bg-budget" type="number" inputmode="numeric" min="0" value="${j.budget}"></label>
+    <label class="field"><span>Faktiskt spenderat hittills (kr)</span><input id="bg-spent" type="number" inputmode="numeric" min="0" value="${j.spent || 0}"></label>
+    <button class="btn block secondary" id="bg-save">Spara</button>
+    <div id="bg-status" class="card" style="margin-top:10px">${budgetStatus(j, planMid)}</div>
+    <button class="btn block" id="bg-copy" style="margin-top:8px">📋 Kopiera materiallista</button>
+    <p class="muted" style="margin-top:10px">Materialpriser är riktpriser från bygghandeln inkl. moms. Som privatperson som anlitar hantverkare kan du ha rätt till ROT — det hanterar hantverkaren på sin faktura.</p>
+  `);
+  const recompute = () => {
+    j.budget = parseFloat($("#bg-budget").value) || 0;
+    j.spent = parseFloat($("#bg-spent").value) || 0;
+    $("#bg-status").innerHTML = budgetStatus(j, planMid);
+  };
+  $("#bg-budget").addEventListener("input", recompute);
+  $("#bg-spent").addEventListener("input", recompute);
+  $("#bg-save").addEventListener("click", () => { recompute(); store.save(); toast("Sparat"); });
+  $("#bg-copy").addEventListener("click", async () => {
+    const txt = j.material.flatMap(m => m.items.map(i => `• ${i.name}: ${i.qty} ${i.unit}`)).join("\n");
+    await navigator.clipboard.writeText(txt || "Inget material ännu");
+    toast("Kopierat!");
+  });
+}
+
+function budgetStatus(j, planMid) {
+  const spent = j.spent || 0, budget = j.budget || 0;
+  const kvar = budget - spent;
+  const overPlan = budget && planMid > budget;
+  return `
+    <div class="total-line" style="font-weight:400"><span>Budget</span><span>${kr(budget)}</span></div>
+    <div class="total-line" style="font-weight:400"><span>Spenderat</span><span>${kr(spent)}</span></div>
+    <div class="total-line"><span>Kvar av budget</span><span style="color:${kvar >= 0 ? "var(--green)" : "var(--red)"}">${kr(kvar)}</span></div>
+    ${overPlan ? `<div class="warn" style="margin-top:8px">⚠ Beräknad kostnad (${kr(planMid)}) överstiger din budget.</div>` : ""}`;
 }
 
 function showOffert(jobId) {
@@ -893,7 +961,7 @@ function renderCalcResult(res, label, calcKey) {
     modal(`
       <div class="modal-head"><h2>Spara på vilket jobb?</h2><button class="btn-icon" data-close>✕</button></div>
       ${state.jobs.slice().sort((a, b) => b.skapad - a.skapad).map(jb =>
-        `<div class="card tappable" data-pick="${jb.id}"><strong>${esc(jb.namn)}</strong> <span class="badge ${jb.status}">${STATUS_LABEL[jb.status]}</span></div>`).join("")}
+        `<div class="card tappable" data-pick="${jb.id}"><strong>${esc(jb.namn)}</strong> <span class="badge ${jb.status}">${statusLabel(jb.status)}</span></div>`).join("")}
     `);
     document.querySelectorAll("[data-pick]").forEach(c => c.addEventListener("click", () => {
       closeModal(); saveTo(c.dataset.pick);
@@ -1050,18 +1118,21 @@ function renderStats() {
   const problem = state.jobs.filter(j => j.status !== "fakturerat")
     .flatMap(j => j.notes.filter(n => n.type === "problem").map(n => ({ ...n, jobNamn: j.namn })));
 
+  const klara = state.jobs.filter(j => j.status === "klart").length;
   v.innerHTML = `
     <div class="stat-grid">
-      <div class="card"><div class="num">${pagaende}</div><div class="muted">Pågående jobb</div></div>
-      <div class="card"><div class="num">${fmtMin(minWeek)}</div><div class="muted">Loggat senaste 7 dgr</div></div>
-      <div class="card"><div class="num">${attFakturera.length}</div><div class="muted">Klara att fakturera</div></div>
-      <div class="card"><div class="num">${kr(fakturaVarde)}</div><div class="muted">Ofakturerat arbete</div></div>
+      <div class="card"><div class="num">${pagaende}</div><div class="muted">Pågående ${T().job}</div></div>
+      ${isPro()
+        ? `<div class="card"><div class="num">${fmtMin(minWeek)}</div><div class="muted">Loggat senaste 7 dgr</div></div>
+           <div class="card"><div class="num">${attFakturera.length}</div><div class="muted">Klara att fakturera</div></div>
+           <div class="card"><div class="num">${kr(fakturaVarde)}</div><div class="muted">Ofakturerat arbete</div></div>`
+        : `<div class="card"><div class="num">${klara}</div><div class="muted">Klara projekt</div></div>`}
     </div>
 
-    <button class="btn block" id="st-shop" style="margin-top:14px">🛒 Inköpslista (alla aktiva jobb)</button>
+    <button class="btn block" id="st-shop" style="margin-top:14px">🛒 Inköpslista (alla aktiva ${T().jobs.toLowerCase()})</button>
     <button class="btn block secondary" id="st-pred" style="margin-top:8px">📈 Prognos & avvikelser</button>
 
-    ${attFakturera.length ? `<h2 style="margin-top:16px">💸 Att fakturera</h2>
+    ${isPro() && attFakturera.length ? `<h2 style="margin-top:16px">💸 Att fakturera</h2>
       ${attFakturera.map(j => `<div class="card tappable" data-job="${j.id}">
         <div class="row"><strong class="grow">${esc(j.namn)}</strong><span>${kr(totalMin(j) / 60 * state.settings.timpris)}</span></div>
       </div>`).join("")}` : ""}
@@ -1181,6 +1252,10 @@ function exportData() {
 function showSettings() {
   modal(`
     <div class="modal-head"><h2>Inställningar</h2><button class="btn-icon" data-close>✕</button></div>
+    <label class="field"><span>Läge</span>
+      <select id="s-mode"><option value="pro" ${isPro() ? "selected" : ""}>Proffs (firma, fakturering)</option><option value="privat" ${!isPro() ? "selected" : ""}>Privat (egna projekt)</option></select>
+      <div class="muted" style="margin-top:3px">Privatläge döljer kund, fakturering och tidsdebitering — fokus på material och budget.</div></label>
+    ${isPro() ? `
     <label class="field"><span>Timpris (kr/h, inkl. moms)</span><input id="s-timpris" type="number" inputmode="numeric" value="${state.settings.timpris}"></label>
     <label class="field"><span>Företagsnamn</span><input id="s-foretag" value="${esc(state.settings.foretag)}"></label>
     <div class="field-row">
@@ -1193,22 +1268,22 @@ function showSettings() {
       <select id="s-system">${Object.entries(INVOICE_SYSTEMS).map(([k, l]) =>
         `<option value="${k}" ${state.settings.fakturasystem === k ? "selected" : ""}>${l}</option>`).join("")}</select>
       <div class="muted" style="margin-top:3px">Styr vilket importformat fakturaunderlaget förbereds för.</div></label>
-    <label class="field"><span>Kundnummer i fakturasystemet (valfritt)</span><input id="s-kundnr" value="${esc(state.settings.kundnr)}" placeholder="t.ex. 1001"></label>
-    <label class="field"><span>Backend-URL (Azure Functions, för auto-uppladdning)</span>
+    <label class="field"><span>Kundnummer i fakturasystemet (valfritt)</span><input id="s-kundnr" value="${esc(state.settings.kundnr)}" placeholder="t.ex. 1001"></label>` : ""}
+    <label class="field"><span>Backend-URL (Azure Functions${isPro() ? ", för auto-uppladdning" : ""})</span>
       <input id="s-backurl" value="${esc(state.settings.backendUrl)}" placeholder="https://din-funktion.azurewebsites.net">
       <div class="muted" style="margin-top:3px">Lämna tomt för att bara kopiera/ladda ner payloaden.</div></label>
     <label class="field"><span>App-nyckel (x-app-key)</span><input id="s-backkey" type="password" value="${esc(state.settings.backendKey)}" placeholder="delas med backenden"></label>
     <label class="field"><span>Dela anonym kalibrering</span>
       <select id="s-share"><option value="1" ${state.settings.shareCalibration ? "selected" : ""}>Ja — bidra till & använd den globala potten</option><option value="0" ${!state.settings.shareCalibration ? "selected" : ""}>Nej — bara min egen data</option></select>
       <div class="muted" style="margin-top:3px">Endast anonyma avvikelsekvoter delas (aldrig kunder, priser eller text). Du får bättre prognoser från allas data.</div></label>
-    <h3 style="margin-top:14px">Utförare</h3>
+    ${isPro() ? `<h3 style="margin-top:14px">Utförare</h3>
     <div id="s-workers">${state.workers.map(w =>
       `<div class="checklist-item"><span class="grow">👷 ${esc(w.namn)}${w.timeCal?.n >= 1 ? ` <span class="muted">(${pct(w.timeCal.avg)}, ${w.timeCal.n})</span>` : ""}</span>
         <button class="btn-icon" style="font-size:13px" data-delworker="${w.id}">🗑</button></div>`).join("") || `<div class="muted">Inga utförare ännu.</div>`}</div>
     <div class="row" style="gap:8px; margin:8px 0 4px">
       <input id="s-workername" class="grow" placeholder="Namn på hantverkare">
       <button class="btn sm" id="s-addworker">Lägg till</button>
-    </div>
+    </div>` : ""}
 
     <label class="field" style="margin-top:14px"><span>Anthropic API-nyckel (för AI-fritextläget)</span>
       <input id="s-apikey" type="password" value="${esc(state.settings.apiKey)}" placeholder="sk-ant-...">
@@ -1221,13 +1296,18 @@ function showSettings() {
     <input type="file" id="s-file" accept=".json,application/json" style="display:none">
   `);
   $("#s-save").addEventListener("click", () => {
-    state.settings.timpris = parseFloat($("#s-timpris").value) || 650;
-    state.settings.foretag = $("#s-foretag").value.trim();
-    state.settings.orgnr = $("#s-orgnr").value.trim();
-    state.settings.fskatt = $("#s-fskatt").value === "1";
-    state.settings.foretagAdress = $("#s-fadress").value.trim();
-    state.settings.fakturasystem = $("#s-system").value;
-    state.settings.kundnr = $("#s-kundnr").value.trim();
+    const prevMode = state.settings.mode;
+    state.settings.mode = $("#s-mode").value;
+    state.settings.modeChosen = true;
+    if (isPro()) {
+      state.settings.timpris = parseFloat($("#s-timpris").value) || 650;
+      state.settings.foretag = $("#s-foretag").value.trim();
+      state.settings.orgnr = $("#s-orgnr").value.trim();
+      state.settings.fskatt = $("#s-fskatt").value === "1";
+      state.settings.foretagAdress = $("#s-fadress").value.trim();
+      state.settings.fakturasystem = $("#s-system").value;
+      state.settings.kundnr = $("#s-kundnr").value.trim();
+    }
     state.settings.backendUrl = $("#s-backurl").value.trim().replace(/\/$/, "");
     state.settings.backendKey = $("#s-backkey").value.trim();
     state.settings.shareCalibration = $("#s-share").value === "1";
@@ -1235,9 +1315,17 @@ function showSettings() {
     store.save();
     closeModal();
     toast("Sparat");
+    if (state.settings.mode !== prevMode) { render(); state.sharedModel = { time: {}, material: {}, fetchedAt: 0 }; }
     syncCalibrationModel(true);
   });
-  $("#s-addworker").addEventListener("click", () => {
+  $("#s-mode").addEventListener("change", () => {
+    state.settings.mode = $("#s-mode").value;
+    state.settings.modeChosen = true;
+    store.save();
+    render();
+    showSettings();
+  });
+  if ($("#s-addworker")) $("#s-addworker").addEventListener("click", () => {
     const namn = $("#s-workername").value.trim();
     if (!namn) { toast("Ange ett namn"); return; }
     state.workers.push({ id: uid(), namn, timeCal: { avg: 1, n: 0 } });
@@ -1287,5 +1375,22 @@ function modal(html) {
 }
 function closeModal() { $("#modal-root").innerHTML = ""; }
 
+function showModeChooser() {
+  modal(`
+    <div class="modal-head"><h2>Välkommen 👋</h2></div>
+    <p class="muted" style="margin-bottom:14px">Hur ska du använda appen? Du kan byta läge när som helst i inställningar.</p>
+    <button class="btn block" data-mode="pro" style="margin-bottom:10px">🔨 Jag är hantverkare / firma<div style="font-weight:400;font-size:13px;opacity:.85">Jobb, kunder, tid, offert & faktura</div></button>
+    <button class="btn block secondary" data-mode="privat">🏠 Privatperson — egna projekt<div style="font-weight:400;font-size:13px;opacity:.85">Material, inköpslista & budget</div></button>
+  `);
+  document.querySelectorAll("[data-mode]").forEach(b => b.addEventListener("click", () => {
+    state.settings.mode = b.dataset.mode;
+    state.settings.modeChosen = true;
+    store.save();
+    closeModal();
+    render();
+  }));
+}
+
 render();
+if (!state.settings.modeChosen) showModeChooser();
 syncCalibrationModel(false);

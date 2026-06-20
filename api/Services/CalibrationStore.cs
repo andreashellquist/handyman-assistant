@@ -18,8 +18,13 @@ public class CalibrationStore
         _table.CreateIfNotExists();
     }
 
+    // Potten segmenteras per användartyp ("pro"/"diy") så nybörjar- och proffsdata
+    // inte förorenar varandra. PartitionKey = "<kind>-<seg>".
+    private static string Seg(string? seg) => seg == "diy" ? "diy" : "pro";
+    private static string Part(string kind, string? seg) => $"{kind}-{Seg(seg)}";
+
     /// <summary>kind = "time" | "material". Kvoten clampas mot uppenbara utliggare.</summary>
-    public async Task AddSampleAsync(string kind, string key, double ratio)
+    public async Task AddSampleAsync(string kind, string key, double ratio, string? seg = "pro")
     {
         if (_table is null) return;
         if (kind != "time" && kind != "material") return;
@@ -27,6 +32,7 @@ public class CalibrationStore
         ratio = Math.Clamp(ratio, 0.25, 4.0);
         key = Sanitize(key);
         if (key.Length == 0) return;
+        var part = Part(kind, seg);
 
         for (var attempt = 0; attempt < 6; attempt++)
         {
@@ -34,11 +40,11 @@ public class CalibrationStore
             bool isNew = false;
             try
             {
-                e = (await _table.GetEntityAsync<TableEntity>(kind, key)).Value;
+                e = (await _table.GetEntityAsync<TableEntity>(part, key)).Value;
             }
             catch (RequestFailedException ex) when (ex.Status == 404)
             {
-                e = new TableEntity(kind, key) { ["Sum"] = 0.0, ["Count"] = 0 };
+                e = new TableEntity(part, key) { ["Sum"] = 0.0, ["Count"] = 0 };
                 isNew = true;
             }
 
@@ -61,7 +67,7 @@ public class CalibrationStore
     }
 
     /// <summary>Tar bort en aggregatpost (t.ex. testdata). Returnerar true om den fanns.</summary>
-    public async Task<bool> DeleteAsync(string kind, string key)
+    public async Task<bool> DeleteAsync(string kind, string key, string? seg = "pro")
     {
         if (_table is null) return false;
         if (kind != "time" && kind != "material") return false;
@@ -69,7 +75,7 @@ public class CalibrationStore
         if (key.Length == 0) return false;
         try
         {
-            await _table.DeleteEntityAsync(kind, key);
+            await _table.DeleteEntityAsync(Part(kind, seg), key);
             return true;
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
@@ -78,8 +84,8 @@ public class CalibrationStore
         }
     }
 
-    /// <summary>Returnerar { time: { key: {avg,n} }, material: { key: {avg,n} } }.</summary>
-    public async Task<Dictionary<string, Dictionary<string, object>>> GetModelAsync()
+    /// <summary>Returnerar { time: { key: {avg,n} }, material: { key: {avg,n} } } för ett segment.</summary>
+    public async Task<Dictionary<string, Dictionary<string, object>>> GetModelAsync(string? seg = "pro")
     {
         var model = new Dictionary<string, Dictionary<string, object>>
         {
@@ -88,13 +94,17 @@ public class CalibrationStore
         };
         if (_table is null) return model;
 
-        await foreach (var e in _table.QueryAsync<TableEntity>())
+        var timePart = Part("time", seg);
+        var matPart = Part("material", seg);
+        var filter = $"PartitionKey eq '{timePart}' or PartitionKey eq '{matPart}'";
+
+        await foreach (var e in _table.QueryAsync<TableEntity>(filter))
         {
             var count = e.GetInt32("Count") ?? 0;
             if (count <= 0) continue;
             var sum = e.GetDouble("Sum") ?? 0;
-            if (!model.TryGetValue(e.PartitionKey, out var bucket)) continue;
-            bucket[e.RowKey] = new { avg = Math.Round(sum / count, 4), n = count };
+            var kind = e.PartitionKey.StartsWith("time") ? "time" : "material";
+            model[kind][e.RowKey] = new { avg = Math.Round(sum / count, 4), n = count };
         }
         return model;
     }

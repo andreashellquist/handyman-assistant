@@ -13,7 +13,7 @@ public class CalibrationFunctions
     private readonly CalibrationStore _store;
     public CalibrationFunctions(CalibrationStore store) => _store = store;
 
-    public record Sample(string kind, string key, double ratio);
+    public record Sample(string kind, string key, double ratio, string? seg);
     public record Contribution(Sample[] samples);
 
     [Function("CalibrationContribute")]
@@ -29,7 +29,7 @@ public class CalibrationFunctions
         catch { return Status(req, HttpStatusCode.BadRequest); }
 
         foreach (var s in c?.samples ?? [])
-            await _store.AddSampleAsync(s.kind, s.key, s.ratio);
+            await _store.AddSampleAsync(s.kind, s.key, s.ratio, s.seg);
 
         return Status(req, HttpStatusCode.NoContent);
     }
@@ -40,7 +40,8 @@ public class CalibrationFunctions
     {
         if (!AppKeyOk(req)) return Status(req, HttpStatusCode.Unauthorized);
 
-        var model = await _store.GetModelAsync();
+        var seg = System.Web.HttpUtility.ParseQueryString(req.Url.Query)["seg"];
+        var model = await _store.GetModelAsync(seg);
         var resp = req.CreateResponse(HttpStatusCode.OK);
         resp.Headers.Add("Content-Type", "application/json; charset=utf-8");
         await resp.WriteStringAsync(JsonSerializer.Serialize(model, Json));
@@ -54,7 +55,8 @@ public class CalibrationFunctions
     {
         if (!AppKeyOk(req)) return Status(req, HttpStatusCode.Unauthorized);
         if (!_store.Enabled) return Status(req, HttpStatusCode.ServiceUnavailable);
-        await _store.DeleteAsync(kind, key);
+        var seg = System.Web.HttpUtility.ParseQueryString(req.Url.Query)["seg"];
+        await _store.DeleteAsync(kind, key, seg);
         return Status(req, HttpStatusCode.NoContent);
     }
 
